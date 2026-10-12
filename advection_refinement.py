@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import dune
 import dune.fem
 import ufl
+import dune.alugrid
 
 
 # ============================================================

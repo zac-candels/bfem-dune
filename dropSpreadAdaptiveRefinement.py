@@ -70,7 +70,7 @@ for element in mesh.elements:
 
     h_min = min(h_min, h_element)
 
-h_min = h_min*2**3
+h_min = h_min*(1/2**3)
 
 
 # Corresponding weights
@@ -225,74 +225,114 @@ def evaluate_at(u, gridView, point):
 
 
 
+# Function to track contact line
+def trackCL(phi_n, dof_coordinates, h):
+    """
+    Estimate the left contact-line position from nodal values of phi_n.
+
+    Parameters
+    ----------
+    phi_n : DUNE-FemPy discrete function
+        Order parameter.
+    dof_coordinates : array-like, shape (N, 2)
+        Coordinates corresponding to phi_n.as_numpy, in the same DOF order.
+    h : float
+        Mesh length scale used for filtering.
+    """
+    values = np.asarray(phi_n.as_numpy).reshape(-1)
+    coords = np.asarray(dof_coordinates)
+
+    # Restrict to the lower part of the domain.
+    mask = coords[:, 1] < 4 * h
+
+    # Select approximate interface points.
+    mask &= (values > -0.2) & (values < 0.2)
+
+    candidates = coords[mask]
+    candidate_values = values[mask]
+
+    if len(candidates) < 2:
+        raise ValueError(
+            "Not enough interface points to estimate the contact line."
+        )
+
+    # Exclude points near the left contact line.
+    min_x = candidates[:, 0].min()
+    keep_rightCL = candidates[:, 0] > min_x + 7 * h
+    
+    max_x = candidates[:, 0].max()
+    keep_leftCL = candidates[:, 0] < max_x - 7*h
+
+    candidates_rightCL = candidates[keep_rightCL]
+    candidate_values_rightCL = candidate_values[keep_rightCL]
+    
+    candidates_leftCL = candidates[keep_leftCL]
+    candidate_values_leftCL = candidate_values[keep_leftCL]
+
+
+
+    # Leftmost and rightmost remaining points.
+    left_idx = np.argmin(candidates_leftCL[:, 0])
+    right_idx = np.argmax(candidates_rightCL[:, 0])
+
+    left_x = candidates_leftCL[left_idx, 0]
+    left_phi = candidate_values_leftCL[left_idx]
+
+    right_x = candidates_rightCL[right_idx, 0]
+    right_phi = candidate_values_rightCL[right_idx]
+
+    return left_x, right_x
+
 
 # Function to compute contact angle 
-
-def computeContactAngle(c_n, Cn, mesh):
-
+def computeContactAngle(c_n, h, Cn, mesh):
     angles = []
     n_vec = np.array([0.0, -1.0])
 
-    # Collect cell barycentres and order parameter values
-    nodal_dict = {}
+    local_c = c_n.localFunction()
 
-    for cell in mesh.elements:
-        geometry = cell.geometry
-        midpt = np.asarray(geometry.center)
+    try:
+        for element in mesh.elements:
+            geometry = element.geometry
 
-        coord = tuple(midpt)
-        value = float( evaluate_at(c_n, mesh, midpt) )
+            # Physical element centre and its reference coordinate
+            midpoint = np.asarray(geometry.center, dtype=float)
+            local_point = geometry.toLocal(midpoint.tolist())
 
-        nodal_dict[coord] = value
+            local_c.bind(element)
+            try:
+                value = float(np.asarray(local_c(local_point)).reshape(-1)[0])
 
-    # Keep points near the substrate
-    nodal_dict = {
-        coord: value
-        for coord, value in nodal_dict.items()
-        if coord[1] < 2 * 0.3
-    }
+                # Keep points near the substrate and interface
+                if midpoint[1] >= 2*h:
+                    continue
+                if not (-0.5 < value < 0.5):
+                    continue
 
-    # Keep interfacial points
-    nodal_dict = {
-        coord: value
-        for coord, value in nodal_dict.items()
-        if -0.5 < value < 0.5
-    }
+                # Gradient with respect to physical coordinates
+                grad_c = np.asarray(local_c.jacobian(local_point)).reshape(-1)
 
+                grad_norm = np.linalg.norm(grad_c)
+                if grad_norm < 1e-14:
+                    continue
 
-    # Find the left-most interfacial point
-    min_x = min(coord[0] for coord in nodal_dict)
+                cos_theta = np.dot(grad_c, n_vec) / grad_norm
+                angles.append(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
 
-    # Exclude points near the left contact line
-    nodal_dict = {
-        coord: value
-        for coord, value in nodal_dict.items()
-        if coord[0] > min_x + 5 * Cn
-    }
+            finally:
+                local_c.unbind()
 
-    # Calculate contact angles
-    for coord in nodal_dict:
-        x = np.asarray(coord)
+    finally:
+        pass
 
-        # Spatial gradient of the discrete function
-        grad_c = np.asarray(c_n.jacobian(x)).reshape(-1)
+    if not angles:
+        raise ValueError(
+            "No valid interfacial points found near the substrate."
+        )
 
-        grad_norm = np.linalg.norm(grad_c)
-
-        if grad_norm < 1e-14:
-            continue
-
-        cos_theta = np.dot(grad_c, n_vec) / grad_norm
-
-        # Protect against floating-point roundoff
-        cos_theta = np.clip(cos_theta, -1.0, 1.0)
-
-        angles.append(np.arccos(cos_theta))
-
-
-    theta_avg = np.mean(angles) * 180.0 / np.pi
-
-    return theta_avg
+    # Preserve the original exclusion of the left contact line.
+    # For that exclusion, store (midpoint, angle) pairs before averaging.
+    return np.degrees(np.mean(angles))
 
     
 #%% Define BCs
@@ -596,7 +636,7 @@ bottomDoFs, topDoFs = wall_dofs()
 print("about to start time-stepping\n\n")
 for n in range(numSteps):
     
-    print("n = ", n)
+    #print("n = ", n)
 
     phi_form_op(zeroFn, rhs_AC_fn)
     mu_form_op(zeroFn, rhs_Mu_fn)
@@ -712,14 +752,14 @@ for n in range(numSteps):
     
     mass_n = dune.fem.integrate((phi_n + 1) / 2)
     
-    print("mass_n = ", mass_n)
+    #print("mass_n = ", mass_n)
     mass_diff.assign( mass_n - mass_init )
     
     if n % 10 == 0:
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.65,
+            refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
             maxLevel=4
@@ -760,15 +800,23 @@ for n in range(numSteps):
         bottomDoFs, topDoFs = wall_dofs()
         
     
-    if n % 100 == 0:
+    if n % 1000 == 0:
         
         print("n = ", n, "writing to file")
         #print("mass_diff type:", type(mass_diff))
         
         #print("mass_n type:", type(mass_n), "\n\n")
         
-        theta_avg = computeContactAngle(phi_n, interfaceThickness, mesh)
-        print("theta = ", theta_avg)
+        if n > 0:
+            theta_avg = computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
+            print("theta = ", theta_avg)
+            
+            xh = V.interpolate(x[0], name="x")
+            yh = V.interpolate(x[1], name="y")
+            dof_coords = np.column_stack([xh.as_numpy, yh.as_numpy])  
+            left_cl, right_cl = trackCL(phi_n, dof_coords, h_min)
+            
+            print("left_cl = ", left_cl, " right_cl = ", right_cl)
         
         vel_expr = getVel(f_n, forceDensity)
         vel3.interpolate(ufl.as_vector([vel_expr[0], vel_expr[1], 0]))
