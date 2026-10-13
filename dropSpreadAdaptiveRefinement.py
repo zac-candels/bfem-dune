@@ -29,7 +29,7 @@ theta = theta_deg * np.pi / 180
 
 Q = 9
 Tfinal = 1500
-dt = 0.001 
+dt = 0.0005 
 beta_mass_diff = 0.1*dt
 numSteps = int(Tfinal/dt)
 L_x = 16
@@ -37,10 +37,18 @@ L_y = 4
 Nx = 40
 Ny = 10
 
+#%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"evenMoreAndMoreRefinement")
+outDirName = os.path.join(WORKDIR, f"test")
 os.makedirs(outDirName, exist_ok=True)
 
+
+log_file = open(outDirName + "/simulation_log.txt", "w")
+log_file.write(f"{'n' :>15}"
+               f"{'r_cl':>15}"
+               f"{'max ||u||':>15}"
+               f"{'theta':>15}\n")
+log_file.flush()
 
 xc, yc = L_x/2, R0 - 0.6*R0
 
@@ -762,7 +770,7 @@ for n in range(numSteps):
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=4
+            maxLevel=5
         )
     
         dune.fem.gridAdapt(
@@ -800,7 +808,7 @@ for n in range(numSteps):
         bottomDoFs, topDoFs = wall_dofs()
         
     
-    if n % 1000 == 0:
+    if n % 2000 == 0:
         
         print("n = ", n, "writing to file")
         #print("mass_diff type:", type(mass_diff))
@@ -820,6 +828,22 @@ for n in range(numSteps):
         
         vel_expr = getVel(f_n, forceDensity)
         vel3.interpolate(ufl.as_vector([vel_expr[0], vel_expr[1], 0]))
+        
+        v_array = vel3.as_numpy.reshape(-1, 3)
+
+        vel_mag = np.linalg.norm(v_array, axis=1)
+        
+        print("Min speed:", vel_mag.min())
+        print("Max speed:", vel_mag.max())
+        
+        print("Max KE:", vel_mag.max()**2)
+        
+        if n > 0:
+            log_file.write(f"{n:15d}"
+                        f"{right_cl:15.3f}"
+                        f"{vel_mag.max():15.8g}"
+                        f"{theta_avg:15.2f}\n")
+            log_file.flush()
 
         mesh.writeVTK(os.path.join(outDirName, f"vel_{n:06d}"), pointdata=[vel3])
         
