@@ -28,10 +28,7 @@ theta_deg = 30
 theta = theta_deg * np.pi / 180
 
 Q = 9
-Tfinal = 1500
-dt = 0.0005 
-beta_mass_diff = 0.1*dt
-numSteps = int(Tfinal/dt)
+
 L_x = 16
 L_y = 4
 Nx = 40
@@ -80,7 +77,10 @@ for element in mesh.elements:
 
 h_min = h_min*(1/2**3)
 
-
+Tfinal = 1500
+dt = 0.01*h_min 
+beta_mass_diff = 0.1*dt
+numSteps = int(Tfinal/dt)
 # Corresponding weights
 w = np.array([
     4/9,
@@ -395,7 +395,7 @@ velSquared = ufl.inner(velocity_n, velocity_n)
 
 print("about to start making AC forms \n\n")
 
-lin_form_AC = phi_n * v * ufl.dx - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
+lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
     - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
         - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
@@ -418,8 +418,7 @@ for idx in range(Q):
         * body_Force(velStar_n, idx, forceDensity) * ufl.dx
 
 
-    lin_form_idx = f_star[idx]*v*ufl.dx\
-        - dt*v*ufl.inner(xi[idx], ufl.grad(f_star[idx]))*ufl.dx\
+    lin_form_idx = - dt*v*ufl.inner(xi[idx], ufl.grad(f_star[idx]))*ufl.dx\
         + dt*v*body_Force(velStar_n, idx, forceDensity)*ufl.dx\
         + double_dot_product_term\
         + dot_product_force_term
@@ -430,7 +429,7 @@ for idx in range(Q):
         density,
         velSquared)
         
-    lin_form_coll = (f_n[idx] - dt/(tau) * (f_n[idx] - f_eq_idx) )*v*ufl.dx
+    lin_form_coll = ( - dt/(tau) * (f_n[idx] - f_eq_idx) )*v*ufl.dx
 
     linear_forms_stream.append(lin_form_idx)
     linear_forms_collision.append(lin_form_coll)
@@ -633,17 +632,16 @@ for n in range(numSteps):
         f_star_periodic = collSolver(b_periodic)
     
         # Expand back to full DUNE space
-        f_star_arrays[idx][:] = P @ f_star_periodic
+        f_star_arrays[idx][:] = P @ f_star_periodic + f_n_arrays[idx][:]
+        
+
     
     #print("did collision \n\n")
         
     #print("about to start streaming")
     for idx in range(Q):
 
-        streamingOps[idx](
-            zeroFn,
-            rhsVecStreaming[idx]
-        )
+        streamingOps[idx](zeroFn, rhsVecStreaming[idx])
 
         # ----------------------------------------------
         # Full RHS
@@ -657,10 +655,7 @@ for n in range(numSteps):
 
         if idx in (2, 5, 6):
 
-            b_full[bottomDoFs] = (
-                f_star[opp_idx[idx]]
-                .as_numpy[bottomDoFs]
-            )
+            b_full[bottomDoFs] = (f_star[opp_idx[idx]].as_numpy[bottomDoFs])
 
         # ----------------------------------------------
         # Boundary condition at top
@@ -668,10 +663,7 @@ for n in range(numSteps):
 
         elif idx in (4, 7, 8):
 
-            b_full[topDoFs] = (
-                f_star[opp_idx[idx]]
-                .as_numpy[topDoFs]
-            )
+            b_full[topDoFs] = (f_star[opp_idx[idx]].as_numpy[topDoFs])
 
         # ----------------------------------------------
         # Periodic reduction
@@ -683,17 +675,17 @@ for n in range(numSteps):
         # Solve
         # ----------------------------------------------
 
-        f_n_periodic = streamSolvers[idx](
-            b_periodic
-        )
+        f_n_periodic = streamSolvers[idx](b_periodic)
 
         # ----------------------------------------------
         # Expand solution
         # ----------------------------------------------
 
-        f_n_arrays[idx][:] = (
-            P @ f_n_periodic
-        )
+        f_n_arrays[idx][:] = (P @ f_n_periodic) + f_star_arrays[idx][:]
+        # Apply bounce-back at the walls AFTER solving
+        f_n_arrays[idx][bottomDoFs] = f_star_arrays[opp_idx[idx]][bottomDoFs]
+        f_n_arrays[idx][topDoFs] = f_star_arrays[opp_idx[idx]][topDoFs]
+        
             
           
     #print("about to solve for phi, mu")
@@ -701,25 +693,17 @@ for n in range(numSteps):
 
     b_phi_periodic = P.T @ b_phi_full
 
-    phi_periodic = collSolver(
-        b_phi_periodic
-    )
+    phi_periodic = collSolver(b_phi_periodic)
 
-    phi_nP1.as_numpy[:] = (
-        P @ phi_periodic
-    )
+    phi_nP1.as_numpy[:] = ( P @ phi_periodic) + phi_n.as_numpy[:]
     
     b_mu_full = rhs_Mu_fn.as_numpy
 
     b_mu_periodic = P.T @ b_mu_full
 
-    mu_periodic = collSolver(
-        b_mu_periodic
-    )
+    mu_periodic = collSolver(b_mu_periodic)
 
-    mu_n.as_numpy[:] = (
-        P @ mu_periodic
-    )
+    mu_n.as_numpy[:] = (P @ mu_periodic)
     
     phi_n.assign(phi_nP1)
     
@@ -736,8 +720,7 @@ for n in range(numSteps):
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=5
-        )
+            maxLevel=5)
     
         dune.fem.gridAdapt(
             marker,
@@ -745,28 +728,23 @@ for n in range(numSteps):
             + f_star
             + rhsVecCollision
             + rhsVecStreaming
-            + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn]
-        )
+            + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     
         # IMPORTANT:
         # Never use the old .as_numpy references after gridAdapt.
     
         f_star_arrays = [
-            f_star[idx].as_numpy for idx in range(Q)
-        ]
+            f_star[idx].as_numpy for idx in range(Q)]
     
         f_n_arrays = [
-            f_n[idx].as_numpy for idx in range(Q)
-        ]
+            f_n[idx].as_numpy for idx in range(Q)]
     
         # Recompute boundary DOF indices
         bottomDoFs = np.where(
-            bottomFn.as_numpy != 0
-        )[0]
+            bottomFn.as_numpy != 0)[0]
     
         topDoFs = np.where(
-            topFn.as_numpy != 0
-        )[0]
+            topFn.as_numpy != 0)[0]
     
         # Rebuild periodic matrix/factorizations
         P, collSolver, streamSolvers = build_solvers()
@@ -774,14 +752,14 @@ for n in range(numSteps):
         bottomDoFs, topDoFs = wall_dofs()
         
     
-    if n % 2000 == 0:
+    if n % 1000 == 0:
         
         print("n = ", n, "writing to file")
         #print("mass_diff type:", type(mass_diff))
         
         #print("mass_n type:", type(mass_n), "\n\n")
         
-        if n > 0:
+        if n > 100:
             theta_avg = computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
             print("theta = ", theta_avg)
             
@@ -804,7 +782,7 @@ for n in range(numSteps):
         
         print("Max KE:", vel_mag.max()**2)
         
-        if n > 0:
+        if n > 100:
             log_file.write(f"{n:15d}"
                         f"{right_cl:15.3f}"
                         f"{vel_mag.max():15.8g}"
