@@ -544,62 +544,18 @@ def build_solvers():
         f_trial * v * ufl.dx
     ).linear().as_numpy)
 
-    # Row-sum lumping
-    sysMatDiag = np.asarray(
-        massMatConsistent.sum(axis=1)
-    ).ravel()
+    # Full-space lumped mass diagonal
+    mass_diag = np.asarray(massMatConsistent.sum(axis=1)).ravel()
     
-    # Construct an N x N diagonal sparse matrix
-    massMatLumped = scipy.sparse.diags(
-        sysMatDiag,
-        format="csr"
-    )
+    # Periodic lumped mass diagonal
+    mass_diag_periodic = np.asarray(P.T @ mass_diag).ravel()
     
-
-    # ---------------------------------------------
-    # PERIODIC REDUCTION
-    # ---------------------------------------------
-
-    for idx in range(Q):
-        A_stream_periodic = ( P.T @  massMatLumped  @ P ).tocsc()
+    if np.any(mass_diag_periodic <= 0):
+        raise ValueError("Periodic lumped mass contains non-positive entries")
     
-        A_coll_periodic = ( P.T @  massMatLumped  @ P ).tocsc()
-    
-        sysMatStream.append(
-            A_stream_periodic
-        )
-    
-        sysMatColl.append(
-            A_coll_periodic
-        )
+    return P, mass_diag, mass_diag_periodic
 
-    # =====================================================
-    # Factorizations
-    # =====================================================
-
-    # Collision matrix is identical for all directions,
-    # so one factorization is sufficient.
-    collSolver = scipy.sparse.linalg.factorized(
-        sysMatColl[0]
-    )
-
-    streamSolvers = []
-
-    for idx in range(Q):
-
-        streamSolvers.append(
-            scipy.sparse.linalg.factorized(
-                sysMatStream[idx]
-            )
-        )
-        
-    # print("coll matrix shape:", A_coll_periodic.shape)
-    # print("coll solver expected RHS:", A_coll_periodic.shape[0])
-
-        
-    return P, collSolver, streamSolvers
-
-P, collSolver, streamSolvers = build_solvers()
+P, mass_diag, mass_diag_periodic = build_solvers()
 
 bottomDoFs, topDoFs = wall_dofs()
     
@@ -629,7 +585,7 @@ for n in range(numSteps):
         b_periodic = P.T @ b_full
     
         # Solve periodic system
-        f_star_periodic = collSolver(b_periodic)
+        f_star_periodic = b_periodic / mass_diag_periodic
     
         # Expand back to full DUNE space
         f_star_arrays[idx][:] = P @ f_star_periodic + f_n_arrays[idx][:]
@@ -675,7 +631,7 @@ for n in range(numSteps):
         # Solve
         # ----------------------------------------------
 
-        f_n_periodic = streamSolvers[idx](b_periodic)
+        f_n_periodic = b_periodic / mass_diag_periodic
 
         # ----------------------------------------------
         # Expand solution
@@ -693,7 +649,7 @@ for n in range(numSteps):
 
     b_phi_periodic = P.T @ b_phi_full
 
-    phi_periodic = collSolver(b_phi_periodic)
+    phi_periodic = b_phi_periodic / mass_diag_periodic
 
     phi_nP1.as_numpy[:] = ( P @ phi_periodic) + phi_n.as_numpy[:]
     
@@ -701,7 +657,7 @@ for n in range(numSteps):
 
     b_mu_periodic = P.T @ b_mu_full
 
-    mu_periodic = collSolver(b_mu_periodic)
+    mu_periodic = b_mu_periodic / mass_diag_periodic
 
     mu_n.as_numpy[:] = (P @ mu_periodic)
     
@@ -747,7 +703,7 @@ for n in range(numSteps):
             topFn.as_numpy != 0)[0]
     
         # Rebuild periodic matrix/factorizations
-        P, collSolver, streamSolvers = build_solvers()
+        P, mass_diag, mass_diag_periodic = build_solvers()
         
         bottomDoFs, topDoFs = wall_dofs()
         
