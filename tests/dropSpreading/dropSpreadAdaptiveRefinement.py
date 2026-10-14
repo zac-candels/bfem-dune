@@ -1,6 +1,6 @@
 import os
 os.environ["DUNE_LOG_LEVEL"] = "ERROR"
-
+import argparse
 from scipy.sparse import linalg
 from math import sqrt
 import matplotlib.pyplot as plt
@@ -13,10 +13,36 @@ import scipy
 import numpy as np
 import os
 import time
-
-
-
 import ufl
+
+
+parser = argparse.ArgumentParser(
+    description="Droplet spreading simulation"
+)
+
+parser.add_argument(
+    "--tau",
+    type=float,
+    required=True,
+    help="Relaxation time"
+)
+
+parser.add_argument(
+    "--theta",
+    type=float,
+    required=True,
+    help="Contact angle in degrees"
+)
+
+args = parser.parse_args()
+
+tau = args.tau
+theta_deg = args.theta
+theta = np.deg2rad(theta_deg)
+
+print(f"Running simulation with tau={tau}, theta={theta_deg}")
+
+
 
 R0 = 2
 initDropDiam = 2*R0
@@ -24,7 +50,6 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 30
 theta = theta_deg * np.pi / 180
 
 Q = 9
@@ -39,8 +64,20 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"test")
+
+tau_label = f"{tau:g}"
+theta_label = f"CA{theta_deg:g}"
+
+outDirName = os.path.join(
+    WORKDIR,
+    "results",
+    f"tau_{tau_label}",
+    theta_label
+)
+
 os.makedirs(outDirName, exist_ok=True)
+
+print(f"Output directory: {outDirName}")
 
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -55,7 +92,6 @@ xc, yc = L_x/2, R0 - 0.6*R0
 rho_init = 1.0
 nu = 1/3
 c_s = np.sqrt(1/3)
-tau = 0.1
 
 domain = dune.grid.cartesianDomain(
     [0.0, 0.0],

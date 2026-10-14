@@ -1,3 +1,7 @@
 **.vtu
 **.log
 **.dgf
+**.out
+**.err
+**/results
+**/.cache
