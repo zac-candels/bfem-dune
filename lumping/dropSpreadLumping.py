@@ -36,7 +36,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"test")
+outDirName = os.path.join(WORKDIR, f"test_reduce_dt")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -78,7 +78,7 @@ for element in mesh.elements:
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.01*h_min 
+dt = 0.05*h_min 
 beta_mass_diff = 0.1*dt
 numSteps = int(Tfinal/dt)
 # Corresponding weights
@@ -594,54 +594,26 @@ for n in range(numSteps):
     
     #print("did collision \n\n")
         
-    #print("about to start streaming")
+    # Stream all populations
     for idx in range(Q):
-
         streamingOps[idx](zeroFn, rhsVecStreaming[idx])
-
-        # ----------------------------------------------
-        # Full RHS
-        # ----------------------------------------------
-
+    
         b_full = rhsVecStreaming[idx].as_numpy
-
-        # ----------------------------------------------
-        # Boundary condition at bottom
-        # ----------------------------------------------
-
-        if idx in (2, 5, 6):
-
-            b_full[bottomDoFs] = (f_star[opp_idx[idx]].as_numpy[bottomDoFs])
-
-        # ----------------------------------------------
-        # Boundary condition at top
-        # ----------------------------------------------
-
-        elif idx in (4, 7, 8):
-
-            b_full[topDoFs] = (f_star[opp_idx[idx]].as_numpy[topDoFs])
-
-        # ----------------------------------------------
-        # Periodic reduction
-        # ----------------------------------------------
-
         b_periodic = P.T @ b_full
-
-        # ----------------------------------------------
-        # Solve
-        # ----------------------------------------------
-
         f_n_periodic = b_periodic / mass_diag_periodic
-
-        # ----------------------------------------------
-        # Expand solution
-        # ----------------------------------------------
-
-        f_n_arrays[idx][:] = (P @ f_n_periodic) + f_star_arrays[idx][:]
-        # Apply bounce-back at the walls AFTER solving
-        f_n_arrays[idx][bottomDoFs] = f_star_arrays[opp_idx[idx]][bottomDoFs]
-        f_n_arrays[idx][topDoFs] = f_star_arrays[opp_idx[idx]][topDoFs]
-        
+    
+        f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
+    
+    # Bottom wall: reflect populations into the fluid
+    for idx in (2, 5, 6):
+        f_n_arrays[idx][bottomDoFs] = (
+            f_star_arrays[opp_idx[idx]][bottomDoFs])
+    
+    # Top wall
+    for idx in (4, 7, 8):
+        f_n_arrays[idx][topDoFs] = (
+            f_star_arrays[opp_idx[idx]][topDoFs])
+            
             
           
     #print("about to solve for phi, mu")
