@@ -37,7 +37,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"flat_surface_gmsh_smallDt")
+outDirName = os.path.join(WORKDIR, f"gmsh_with_refinement")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -170,34 +170,21 @@ mesh_file = create_sinusoidal_mesh(
     L_y=L_y,
     surface_amplitude=0.0,
     surface_freq=L_x / (8.0 * np.pi),
-    n_surface=100,
-    lc=0.2)
+    n_surface=40,
+    lc=0.3)
 
 print("\nSTEP 2: Mesh generation completed", flush=True)
 
 
-#%% Import the Gmsh mesh into ALUGrid
-
-print("\nSTEP 3: Preparing DUNE mesh reader", flush=True)
-
+# Import the Gmsh mesh and wrap it in an ALUGrid leaf view.
 from dune.grid import reader
+from dune.alugrid import aluConformGrid
+from dune.fem.view import adaptiveLeafGridView
 
-domain = (reader.meshio, mesh_file)
+grid_description = (reader.gmsh, mesh_file)
 
-print("\nSTEP 4: Creating ALUGrid", flush=True)
-
-grid = dune.alugrid.aluConformGrid(domain, dimgrid=2)
-
-print("\nSTEP 5: ALUGrid created successfully", flush=True)
-
-
-#%% Create adaptive grid view
-
-print("\nSTEP 6: Creating adaptive grid view", flush=True)
-
-mesh = dune.fem.view.adaptiveLeafGridView(grid)
-
-print("\nSTEP 7: Adaptive grid view created successfully", flush=True)
+grid = aluConformGrid(grid_description, dimgrid=2)
+mesh = adaptiveLeafGridView(grid)
 
 
 h_min = np.inf
@@ -215,7 +202,7 @@ for element in mesh.elements:
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.05*h_min 
+dt = 0.003
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.1*dt_c
 numSteps = int(Tfinal/dt)
@@ -279,6 +266,8 @@ t = dune.ufl.Constant(0.0)
 
 #%% Define functions to compute density, velocity, body force
 # and equilibrium distributions
+
+pts = [(8.0, 0.8), (8.0, 2.8), (8.0, 3.5), (3.0, 2.0), (5.5, 0.1)]  # drop centre, interface top, bulk, bulk, near wall
 
 def getDens(f_n):
     return sum(f_n)
@@ -352,21 +341,18 @@ for idx in range(Q):
 
 from dune.common import FieldVector
 
-def evaluate_at(u, gridView, point):
+def evaluate_at(u, gridView, point, eps=1e-10):
     point = np.asarray(point, dtype=float)
     local_u = u.localFunction()
-
     for element in gridView.elements:
-        geometry = element.geometry
-        local_point = geometry.local(point)
-
-        if geometry.checkInside(local_point):
+        lp = np.asarray(element.geometry.toLocal(point.tolist()), dtype=float)
+        # reference triangle: xi >= 0, eta >= 0, xi + eta <= 1
+        if lp[0] >= -eps and lp[1] >= -eps and lp[0] + lp[1] <= 1 + eps:
             local_u.bind(element)
             try:
-                return float(local_u(local_point))
+                return float(np.asarray(local_u(lp.tolist())).reshape(-1)[0])
             finally:
                 local_u.unbind()
-
     raise ValueError(f"Point {point} is outside the grid")
 
 
@@ -513,6 +499,7 @@ def wall_dofs():
 
 #%% Define linear and bilinear forms
 
+substrate = ufl.conditional(x[1] < 1e-8, 1.0, 0.0)
 
 bilinFormsStream = []
 linear_forms_stream = []
@@ -537,9 +524,10 @@ lin_form_AC =  - dt_c*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
     - dt_c*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt_c)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
         - 0.5*dt_c**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
-lin_form_mu =  A* phi_n*(phi_n**2 - 1)*v*ufl.dx\
-    + kappa*ufl.dot(ufl.grad(phi_n),ufl.grad(v))*ufl.dx\
-        + kappa/(np.sqrt(2)*interfaceThickness)*np.cos(theta)*(phi_n**2-1)*v*ufl.ds(3)
+lin_form_mu = A*phi_n*(phi_n**2 - 1)*v*ufl.dx \
+    + kappa*ufl.dot(ufl.grad(phi_n), ufl.grad(v))*ufl.dx \
+    + substrate*kappa/(np.sqrt(2)*interfaceThickness)*np.cos(theta)*(phi_n**2 - 1)*v*ufl.ds
+
 
 print("finished making AC forms \n\n")
 opp_idx = {0: 0, 1: 3, 2: 4, 3: 1, 4: 2, 5: 7, 6: 8, 7: 5, 8: 6}
@@ -702,9 +690,7 @@ bottomDoFs, topDoFs = wall_dofs()
 
 print("about to start time-stepping\n\n")
 for n in range(numSteps):
-    
-    if n == 600:
-        dt_c.assign(dt/200) 
+
     
     #print("n = ", n)
 
@@ -786,7 +772,8 @@ for n in range(numSteps):
     # AMR: adapt the grid and rebuild mesh-dependent objects
     # ============================================================
     
-    if n == 700:
+    
+    if n == 500:
     
         # --------------------------------------------------------
         # 1. Mark and adapt the grid.
@@ -895,33 +882,9 @@ for n in range(numSteps):
         # 8. Verify dimensions and transferred values.
         # --------------------------------------------------------
     
-        N = len(phi_n.as_numpy)
+
     
-        assert all(len(a) == N for a in f_n_arrays)
-        assert all(len(a) == N for a in f_star_arrays)
-        assert len(mu_n.as_numpy) == N
-        assert P.shape[0] == N
-        assert len(mass_diag) == N
-    
-        rho_check = np.sum(np.stack(f_n_arrays), axis=0)
-    
-        print("\n--- Diagnostics immediately after AMR ---")
-        print("DOFs:", N)
-        print("Periodic projection:", P.shape)
-        print("Density min/max:", rho_check.min(), rho_check.max())
-        print("Density finite:", np.isfinite(rho_check).all())
-        print(
-            "Phase field min/max:",
-            phi_n.as_numpy.min(),
-            phi_n.as_numpy.max()
-        )
-        print("Phase field finite:", np.isfinite(phi_n.as_numpy).all())
-        print("Lumped mass minimum:", mass_diag.min())
-        print("Periodic lumped mass minimum:", mass_diag_periodic.min())
-        print("------------------------------------------\n")
-            
-    
-    if (n < 700 and n % 50 == 0) or ( n > 700 and n % 10 == 0):
+    if n % 50 == 0:
         
         print("n = ", n, "writing to file")
         #print("mass_diff type:", type(mass_diff))

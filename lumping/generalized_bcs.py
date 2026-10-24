@@ -4,6 +4,7 @@ os.environ["DUNE_LOG_LEVEL"] = "ERROR"
 from scipy.sparse import linalg
 from math import sqrt
 import matplotlib.pyplot as plt
+import gmsh
 #import pygmsh
 #from dune.alugrid import aluConformGrid as GridView
 from dune.ufl import Constant, DirichletBC
@@ -13,7 +14,6 @@ import scipy
 import numpy as np
 import os
 import time
-import gmsh
 from collections import defaultdict
 
 
@@ -31,6 +31,18 @@ theta = theta_deg * np.pi / 180
 
 Q = 9
 
+xi_values = [
+    (0.0,  0.0),
+    (1.0,  0.0),
+    (0.0,  1.0),
+    (-1.0, 0.0),
+    (0.0, -1.0),
+    (1.0,  1.0),
+    (-1.0, 1.0),
+    (-1.0, -1.0),
+    (1.0, -1.0),
+]
+
 L_x = 16
 L_y = 4
 Nx = 40
@@ -38,7 +50,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"curved_bdy")
+outDirName = os.path.join(WORKDIR, f"gmsh_with_refinement")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -56,36 +68,6 @@ nu = 1/3
 c_s = np.sqrt(1/3)
 tau = 0.1
 
-w = np.array([
-    4/9,
-    1/9, 1/9, 1/9, 1/9,
-    1/36, 1/36, 1/36, 1/36
-])
-
-xi = [
-        dune.ufl.Constant((0.0,  0.0)),
-        dune.ufl.Constant((1.0,  0.0)),
-        dune.ufl.Constant((0.0,  1.0)),
-        dune.ufl.Constant((-1.0,  0.0)),
-        dune.ufl.Constant((0.0, -1.0)),
-        dune.ufl.Constant((1.0,  1.0)),
-        dune.ufl.Constant((-1.0,  1.0)),
-        dune.ufl.Constant((-1.0, -1.0)),
-        dune.ufl.Constant((1.0, -1.0)),
-    ]
-
-xi_values = [
-    (0.0,  0.0),
-    (1.0,  0.0),
-    (0.0,  1.0),
-    (-1.0, 0.0),
-    (0.0, -1.0),
-    (1.0,  1.0),
-    (-1.0, 1.0),
-    (-1.0, -1.0),
-    (1.0, -1.0),
-]
-
 def create_sinusoidal_mesh(
     L_x,
     L_y,
@@ -93,8 +75,7 @@ def create_sinusoidal_mesh(
     surface_freq=None,
     n_surface=200,
     lc=0.1,
-    filename="sinusoidal_wall.msh",
-):
+    filename="sinusoidal_wall.msh"):
     """
     Create a 2D Gmsh mesh with a sinusoidal bottom boundary.
 
@@ -203,33 +184,58 @@ mesh_file = create_sinusoidal_mesh(
     surface_amplitude=0.0,
     surface_freq=L_x / (8.0 * np.pi),
     n_surface=40,
-    lc=0.4)
+    lc=0.3)
 
 print("\nSTEP 2: Mesh generation completed", flush=True)
 
 
-#%% Import the Gmsh mesh into ALUGrid
-
-print("\nSTEP 3: Preparing DUNE mesh reader", flush=True)
-
+# Import the Gmsh mesh and wrap it in an ALUGrid leaf view.
 from dune.grid import reader
+from dune.alugrid import aluConformGrid
+from dune.fem.view import adaptiveLeafGridView
 
-domain = (reader.meshio, mesh_file)
+grid_description = (reader.gmsh, mesh_file)
 
-print("\nSTEP 4: Creating ALUGrid", flush=True)
+grid = aluConformGrid(grid_description, dimgrid=2)
+mesh = adaptiveLeafGridView(grid)
 
-grid = dune.alugrid.aluConformGrid(domain, dimgrid=2)
+h_min = np.inf
 
-print("\nSTEP 5: ALUGrid created successfully", flush=True)
+for element in mesh.elements:
+    corners = np.asarray(element.geometry.corners)
 
+    h_element = max(
+        np.linalg.norm(a - b)
+        for i, a in enumerate(corners)
+        for b in corners[i + 1:])
 
-#%% Create adaptive grid view
+    h_min = min(h_min, h_element)
 
-print("\nSTEP 6: Creating adaptive grid view", flush=True)
+h_min = h_min*(1/2**3)
 
-mesh = dune.fem.view.adaptiveLeafGridView(grid)
+Tfinal = 1500
+dt = 0.003
+dt_c = dune.ufl.Constant(dt, name="dt")
+beta_mass_diff = 0.1*dt_c
+numSteps = int(Tfinal/dt)
+# Corresponding weights
+w = np.array([
+    4/9,
+    1/9, 1/9, 1/9, 1/9,
+    1/36, 1/36, 1/36, 1/36
+])
 
-print("\nSTEP 7: Adaptive grid view created successfully", flush=True)
+xi = [
+        dune.ufl.Constant((0.0,  0.0)),
+        dune.ufl.Constant((1.0,  0.0)),
+        dune.ufl.Constant((0.0,  1.0)),
+        dune.ufl.Constant((-1.0,  0.0)),
+        dune.ufl.Constant((0.0, -1.0)),
+        dune.ufl.Constant((1.0,  1.0)),
+        dune.ufl.Constant((-1.0,  1.0)),
+        dune.ufl.Constant((-1.0, -1.0)),
+        dune.ufl.Constant((1.0, -1.0)),
+    ]
 
 
 #%% Create finite-element space
@@ -315,8 +321,7 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
 
     bouncebackDofs = {
         idx: np.asarray(dofs, dtype=int)
-        for idx, dofs in bouncebackDofs.items()
-    }
+        for idx, dofs in bouncebackDofs.items()}
 
     return bouncebackDofs
 
@@ -620,6 +625,7 @@ def wall_dofs():
 
 #%% Define linear and bilinear forms
 
+substrate = ufl.conditional(x[1] < 1e-8, 1.0, 0.0)
 
 bilinFormsStream = []
 linear_forms_stream = []
@@ -644,9 +650,10 @@ lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
     - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
         - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
-lin_form_mu =  A* phi_n*(phi_n**2 - 1)*v*ufl.dx\
-    + kappa*ufl.dot(ufl.grad(phi_n),ufl.grad(v))*ufl.dx\
-        + kappa/(np.sqrt(2)*interfaceThickness)*np.cos(theta)*(phi_n**2-1)*v*ufl.ds(3)
+lin_form_mu = A*phi_n*(phi_n**2 - 1)*v*ufl.dx \
+    + kappa*ufl.dot(ufl.grad(phi_n), ufl.grad(v))*ufl.dx \
+    + substrate*kappa/(np.sqrt(2)*interfaceThickness)*np.cos(theta)*(phi_n**2 - 1)*v*ufl.ds
+
 
 print("finished making AC forms \n\n")
 opp_idx = {0: 0, 1: 3, 2: 4, 3: 1, 4: 2, 5: 7, 6: 8, 7: 5, 8: 6}
@@ -876,54 +883,47 @@ for n in range(numSteps):
     
     phi_a, mu_a = phi_n.as_numpy, mu_n.as_numpy
     rho = sum(f_n_arrays)
-    # if n % 20 == 0 or not (np.isfinite(phi_a).all() and np.isfinite(rho).all()):
-    #     print(n, "phi[min,max]", phi_a.min(), phi_a.max(),
-    #           "|mu|max", np.abs(mu_a).max(),
-    #           "rho[min,max]", rho.min(), rho.max(),
-    #           "fmin", min(a.min() for a in f_n_arrays))
-    # if not (np.isfinite(phi_a).all() and np.isfinite(rho).all()):
-    #     break
+
     
-    # if n % 10 == 0:
+    if n % 10 == 0:
     
-    #     marker = dune.fem.GridMarker(
-    #         1 - phi_n**2,
-    #         refineTolerance=0.6,
-    #         coarsenTolerance=0.2,
-    #         minLevel=0,
-    #         maxLevel=2)
+        marker = dune.fem.GridMarker(
+            1 - phi_n**2,
+            refineTolerance=0.6,
+            coarsenTolerance=0.2,
+            minLevel=0,
+            maxLevel=2)
     
-    #     dune.fem.gridAdapt(
-    #         marker,
-    #         f_n
-    #         + f_star
-    #         + rhsVecCollision
-    #         + rhsVecStreaming
-    #         + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
+        dune.fem.gridAdapt(
+            marker,
+            f_n
+            + f_star
+            + rhsVecCollision
+            + rhsVecStreaming
+            + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     
-    #     # IMPORTANT:
-    #     # Never use the old .as_numpy references after gridAdapt.
+        # IMPORTANT:
+        # Never use the old .as_numpy references after gridAdapt.
     
-    #     f_star_arrays = [
-    #         f_star[idx].as_numpy for idx in range(Q)]
+        f_star_arrays = [
+            f_star[idx].as_numpy for idx in range(Q)]
     
-    #     f_n_arrays = [
-    #         f_n[idx].as_numpy for idx in range(Q)]
+        f_n_arrays = [
+            f_n[idx].as_numpy for idx in range(Q)]
     
-    #     # Recompute boundary DOF indices
-    #     bottomDoFs = np.where(
-    #         bottomFn.as_numpy != 0)[0]
+        # Recompute boundary DOF indices
+        bottomDoFs = np.where(
+            bottomFn.as_numpy != 0)[0]
     
-    #     topDoFs = np.where(
-    #         topFn.as_numpy != 0)[0]
+        topDoFs = np.where(
+            topFn.as_numpy != 0)[0]
     
-    #     # Rebuild periodic matrix/factorizations
-    #     P, mass_diag, mass_diag_periodic = build_solvers()
+        # Rebuild periodic matrix/factorizations
+        P, mass_diag, mass_diag_periodic = build_solvers()
         
-    #     bottomDoFs, topDoFs = wall_dofs()
-    #     print("wall dofs:", len(bottomDoFs), len(topDoFs))
+        bottomDoFs, topDoFs = wall_dofs()
         
-    #     bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
+        bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
     if n % 50 == 0:
