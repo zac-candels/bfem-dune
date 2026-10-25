@@ -50,7 +50,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"gmsh_with_refinement")
+outDirName = os.path.join(WORKDIR, f"curved_bdy")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -181,7 +181,7 @@ print("\nSTEP 1: Starting mesh generation", flush=True)
 mesh_file = create_sinusoidal_mesh(
     L_x=L_x,
     L_y=L_y,
-    surface_amplitude=0.0,
+    surface_amplitude=1.4,
     surface_freq=L_x / (8.0 * np.pi),
     n_surface=40,
     lc=0.3)
@@ -198,6 +198,9 @@ grid_description = (reader.gmsh, mesh_file)
 
 grid = aluConformGrid(grid_description, dimgrid=2)
 mesh = adaptiveLeafGridView(grid)
+
+from dune.fem.function import boundaryFunction
+boundaryFunction(grid).plot()
 
 h_min = np.inf
 
@@ -387,6 +390,18 @@ mass_diff = dune.ufl.Constant(1e-9)
 forceDensity = -phi_n * ufl.grad(mu_n)
 
 t = dune.ufl.Constant(0.0)
+
+
+def bnd_len(bid=None):
+    form = f_trial*v*(ufl.ds if bid is None else ufl.ds(bid))
+    return dune.fem.assemble(form).as_numpy.sum()
+
+print("total boundary :", bnd_len())
+for bid in range(0, 8):
+    try:
+        print(f"ds({bid}) =", bnd_len(bid))
+    except Exception as e:
+        print(f"ds({bid}) failed:", type(e).__name__)
 
 
 #%% Define functions to compute density, velocity, body force
@@ -650,10 +665,19 @@ lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
     - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
         - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
+wall_ind = ufl.conditional(
+    ufl.And(x[1] < L_y - 1e-6,
+            ufl.And(x[0] > 1e-6, x[0] < L_x - 1e-6)),
+    1.0, 0.0)
+
 lin_form_mu = A*phi_n*(phi_n**2 - 1)*v*ufl.dx \
     + kappa*ufl.dot(ufl.grad(phi_n), ufl.grad(v))*ufl.dx \
-    + substrate*kappa/(np.sqrt(2)*interfaceThickness)*np.cos(theta)*(phi_n**2 - 1)*v*ufl.ds
+    + wall_ind*kappa/(np.sqrt(2)*interfaceThickness)*np.cos(theta) \
+      *(phi_n**2 - 1)*v*ufl.ds
 
+wall_len  = dune.fem.assemble(f_trial*v*wall_ind*ufl.ds).as_numpy.sum()
+total_len = dune.fem.assemble(f_trial*v*ufl.ds).as_numpy.sum()
+print("wall:", wall_len, " rest:", total_len - wall_len)   # expect ~17.9 and 24.0
 
 print("finished making AC forms \n\n")
 opp_idx = {0: 0, 1: 3, 2: 4, 3: 1, 4: 2, 5: 7, 6: 8, 7: 5, 8: 6}
@@ -839,20 +863,20 @@ for n in range(numSteps):
     
         f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
     
-    # Bottom wall: reflect populations into the fluid
-    for idx in (2, 5, 6):
-        f_n_arrays[idx][bottomDoFs] = (
-            f_star_arrays[opp_idx[idx]][bottomDoFs])
+    # # Bottom wall: reflect populations into the fluid
+    # for idx in (2, 5, 6):
+    #     f_n_arrays[idx][bottomDoFs] = (
+    #         f_star_arrays[opp_idx[idx]][bottomDoFs])
     
-    # Top wall
-    for idx in (4, 7, 8):
-        f_n_arrays[idx][topDoFs] = (
-            f_star_arrays[opp_idx[idx]][topDoFs])
+    # # Top wall
+    # for idx in (4, 7, 8):
+    #     f_n_arrays[idx][topDoFs] = (
+    #         f_star_arrays[opp_idx[idx]][topDoFs])
         
-    # for idx in range(1, Q):
-    #     dofs = bouncebackDofs[idx]
-    #     f_n_arrays[idx][dofs] = (
-    #         f_star_arrays[opp_idx[idx]][dofs])
+    for idx in range(1, Q):
+        dofs = bouncebackDofs[idx]
+        f_n_arrays[idx][dofs] = (
+            f_star_arrays[opp_idx[idx]][dofs])
             
             
           
