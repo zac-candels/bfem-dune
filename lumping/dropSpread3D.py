@@ -15,6 +15,7 @@ import numpy as np
 import os
 import time
 from collections import defaultdict
+from dune.common import comm
 
 
 
@@ -63,16 +64,17 @@ Nz = 20
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"3d")
+outDirName = os.path.join(WORKDIR, f"3d_lc{0.75}_dt{0.025}")
 os.makedirs(outDirName, exist_ok=True)
 
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
-log_file.write(f"{'n' :>15}"
-               f"{'r_cl':>15}"
-               f"{'max ||u||':>15}"
-               f"{'theta':>15}\n")
-log_file.flush()
+if comm.rank == 0:
+    log_file.write(f"{'n' :>15}"
+                   f"{'r_cl':>15}"
+                   f"{'max ||u||':>15}"
+                   f"{'theta':>15}\n")
+    log_file.flush()
 
 xc, yc, zc = L_x/2, R0 - 0.6*R0, L_z/2
 
@@ -241,8 +243,8 @@ def create_sinusoidal_mesh(
 
 
 #%% Generate the Gmsh mesh
-
-print("\nSTEP 1: Starting mesh generation", flush=True)
+if comm.rank == 0:
+    print("\nSTEP 1: Starting mesh generation", flush=True)
 
 mesh_file = create_sinusoidal_mesh(
     L_x=L_x,
@@ -251,9 +253,10 @@ mesh_file = create_sinusoidal_mesh(
     surface_amplitude=1.0,
     surface_freq=L_x / (8.0 * np.pi),
     n_surface=40,
-    lc=0.3)
+    lc=0.75)
 
-print("\nSTEP 2: Mesh generation completed", flush=True)
+if comm.rank == 0:
+    print("\nSTEP 2: Mesh generation completed", flush=True)
 
 import meshio
 from dune.alugrid import aluConformGrid
@@ -268,6 +271,8 @@ grid_description = {"vertices": vertices, "simplices": simplices}
 
 grid = aluConformGrid(grid_description, dimgrid=3)
 mesh = adaptiveLeafGridView(grid)
+
+#print("Number of elements:", mesh.size(0))
 
 #from dune.fem.function import boundaryFunction
 #boundaryFunction(grid).plot()
@@ -287,7 +292,7 @@ for element in mesh.elements:
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.0001*h_min
+dt = 0.025*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
 numSteps = int(Tfinal/dt)
@@ -301,13 +306,15 @@ xi = [dune.ufl.Constant(c) for c in xi_values]
 
 #%% Create finite-element space
 
-print("\nSTEP 8: Creating finite-element space", flush=True)
+if comm.rank == 0:
+    print("\nSTEP 8: Creating finite-element space", flush=True)
 
 V = dune.fem.space.lagrange(mesh, order=1)
 
 x = ufl.SpatialCoordinate(V)
 
-print("\nSTEP 9: Finite-element space created successfully", flush=True)
+if comm.rank == 0:
+    print("\nSTEP 9: Finite-element space created successfully", flush=True)
 
 #%% Compute boundary DOF normals
 
@@ -502,7 +509,8 @@ def body_Force(vel, vel_idx, Force_density):
 
 
 for idx in range(Q):
-    print("idx = ", idx)
+    if comm.rank == 0:
+        print("idx = ", idx, flush=True)
     f_n.append( V.interpolate(
         fEquilInit(idx),
         name=f"f_n{idx}") )
@@ -644,7 +652,8 @@ def computeContactAngle(c_n, h, Cn, mesh):
     
 #%% Define BCs
 
-print("starting to create BCs\n\n")
+if comm.rank == 0:
+    print("starting to create BCs\n\n", flush=True)
 
 u_D = 1
 
@@ -664,7 +673,8 @@ topFn = V.interpolate(
 bottomDoFs = np.where(bottomFn.as_numpy != 0)[0]
 topDoFs = np.where(topFn.as_numpy != 0)[0]
     
-print("done making BCs\n\n")
+if comm.rank == 0:
+    print("done making BCs\n\n", flush=True)
 
 def wall_dofs():
     y = V.interpolate(x[1], name="y_dof").as_numpy
@@ -686,14 +696,16 @@ linear_forms_collision = []
 bilin_form_AC = phi_trial * v * ufl.dx
 bilin_form_mu = mu_trial * v * ufl.dx
 
-print("going to create ufl functions for density, vel, velStar \n\n")
+if comm.rank == 0:
+    print("going to create ufl functions for density, vel, velStar \n\n", flush=True)
 
 density = getDens(f_n)
 velocity_n = getVel(f_n, forceDensity)
 velStar_n = getVel(f_star, forceDensity)
 velSquared = ufl.inner(velocity_n, velocity_n)
 
-print("about to start making AC forms \n\n")
+if comm.rank == 0:
+    print("about to start making AC forms \n\n", flush=True)
 
 lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
     - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
@@ -715,9 +727,11 @@ lin_form_mu = A*phi_n*(phi_n**2 - 1)*v*ufl.dx \
 
 wall_len  = dune.fem.assemble(f_trial*v*wall_ind*ufl.ds).as_numpy.sum()
 total_len = dune.fem.assemble(f_trial*v*ufl.ds).as_numpy.sum()
-print("wall:", wall_len, " rest:", total_len - wall_len)   # expect wall ~17.9*L_z
 
-print("finished making AC forms \n\n")
+if comm.rank == 0:
+    print("wall:", wall_len, " rest:", total_len - wall_len, flush=True)   # expect wall ~17.9*L_z
+    print("finished making AC forms \n\n", flush=True)
+    
 opp_idx = {0: 0}
 for idx in range(1, Q):
     opp_idx[idx] = idx + 1 if idx % 2 == 1 else idx - 1
@@ -750,7 +764,8 @@ for idx in range(Q):
     linear_forms_stream.append(lin_form_idx)
     linear_forms_collision.append(lin_form_coll)
     
-print("finished making LB forms\n\n")
+if comm.rank == 0:
+    print("finished making LB forms\n\n", flush=True)
 
 # Assemble matrices for first step
 sysMatStream = []
@@ -869,7 +884,9 @@ bottomDoFs, topDoFs = wall_dofs()
 
 #%% Time-stepping 
 
-print("about to start time-stepping\n\n")
+if comm.rank == 0:
+    print("about to start time-stepping\n\n")
+    
 for n in range(numSteps):
     
     #print("n = ", n)
@@ -964,7 +981,7 @@ for n in range(numSteps):
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=2)
+            maxLevel=5)
     
         dune.fem.gridAdapt(
             marker,
@@ -1000,14 +1017,18 @@ for n in range(numSteps):
     
     if n % 50 == 0:
         
-        print("n = ", n, "writing to file")
+        if comm.rank == 0:
+            print("n = ", n, "writing to file", flush=True)
+            
         #print("mass_diff type:", type(mass_diff))
         
         #print("mass_n type:", type(mass_n), "\n\n")
         
         if n > 3000:
             theta_avg = computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
-            print("theta = ", theta_avg)
+            
+            if comm.rank == 0:
+                print("theta = ", theta_avg, flush=True)
             
             xh = V.interpolate(x[0], name="x")
             yh = V.interpolate(x[1], name="y")
@@ -1015,7 +1036,8 @@ for n in range(numSteps):
             dof_coords = np.column_stack([xh.as_numpy, yh.as_numpy, zh.as_numpy])  
             left_cl, right_cl = trackCL(phi_n, dof_coords, h_min)
             
-            print("left_cl = ", left_cl, " right_cl = ", right_cl)
+            if comm.rank == 0:
+                print("left_cl = ", left_cl, " right_cl = ", right_cl, flush=True)
         
         vel_expr = getVel(f_n, forceDensity)
         vel3.interpolate(ufl.as_vector([vel_expr[0], vel_expr[1], vel_expr[2]]))
@@ -1024,17 +1046,19 @@ for n in range(numSteps):
 
         vel_mag = np.linalg.norm(v_array, axis=1)
         
-        print("Min speed:", vel_mag.min())
-        print("Max speed:", vel_mag.max())
-        
-        print("Max KE:", vel_mag.max()**2)
-        
+        if comm.rank == 0:
+            print("Min speed:", vel_mag.min(), flush=True)
+            print("Max speed:", vel_mag.max(), flush=True)
+            
+            print("Max KE:", vel_mag.max()**2, flush=True)
+            
         if n > 3000:
-            log_file.write(f"{n:15d}"
-                        f"{right_cl:15.3f}"
-                        f"{vel_mag.max():15.8g}"
-                        f"{theta_avg:15.2f}\n")
-            log_file.flush()
+            if comm.rank == 0:
+                log_file.write(f"{n:15d}"
+                            f"{right_cl:15.3f}"
+                            f"{vel_mag.max():15.8g}"
+                            f"{theta_avg:15.2f}\n")
+                log_file.flush()
 
         mesh.writeVTK(os.path.join(outDirName, f"vel_{n:06d}"), pointdata=[vel3])
         
