@@ -1,6 +1,6 @@
 import os
 os.environ["DUNE_LOG_LEVEL"] = "ERROR"
-
+from mpi4py import MPI
 from scipy.sparse import linalg
 from math import sqrt
 import matplotlib.pyplot as plt
@@ -131,146 +131,151 @@ def create_sinusoidal_mesh(
 
     gmsh.initialize()
 
-    try:
-        gmsh.option.setNumber("General.Terminal", 1)
-        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
 
-        gmsh.model.add("sinusoidal_wall")
+    gmsh.model.add("sinusoidal_wall")
 
-        geo = gmsh.model.geo
+    geo = gmsh.model.geo
 
-        # Bottom boundary points
-        bottom_points = [
-            geo.addPoint(float(x), float(y), 0.0, lc)
-            for x, y in zip(xs, ys)
-        ]
+    # Bottom boundary points
+    bottom_points = [
+        geo.addPoint(float(x), float(y), 0.0, lc)
+        for x, y in zip(xs, ys)
+    ]
 
-        # Top corners
-        top_right = geo.addPoint(L_x, L_y, 0.0, lc)
-        top_left = geo.addPoint(0.0, L_y, 0.0, lc)
+    # Top corners
+    top_right = geo.addPoint(L_x, L_y, 0.0, lc)
+    top_left = geo.addPoint(0.0, L_y, 0.0, lc)
 
-        # Bottom boundary segments
-        wall_lines = [geo.addLine(bottom_points[i],
-                                  bottom_points[i + 1]) for i in range(n_surface)]
+    # Bottom boundary segments
+    wall_lines = [geo.addLine(bottom_points[i],
+                              bottom_points[i + 1]) for i in range(n_surface)]
 
-        # Right, top, and left boundaries
-        right_line = geo.addLine(bottom_points[-1], top_right)
+    # Right, top, and left boundaries
+    right_line = geo.addLine(bottom_points[-1], top_right)
 
-        top_line = geo.addLine(top_right, top_left)
+    top_line = geo.addLine(top_right, top_left)
 
-        left_line = geo.addLine(top_left, bottom_points[0])
+    left_line = geo.addLine(top_left, bottom_points[0])
 
-        # Enclosed 2D profile in the (x, y) plane at z = 0
-        loop = geo.addCurveLoop(wall_lines + [right_line, top_line, left_line])
+    # Enclosed 2D profile in the (x, y) plane at z = 0
+    loop = geo.addCurveLoop(wall_lines + [right_line, top_line, left_line])
 
-        surface = geo.addPlaneSurface([loop])
+    surface = geo.addPlaneSurface([loop])
 
-        # Extrude the profile along z to get the 3D fluid domain
-        # extruded = [top surface (z = L_z), volume, lateral surfaces ...]
-        extruded = geo.extrude([(2, surface)], 0.0, 0.0, L_z)
+    # Extrude the profile along z to get the 3D fluid domain
+    # extruded = [top surface (z = L_z), volume, lateral surfaces ...]
+    extruded = geo.extrude([(2, surface)], 0.0, 0.0, L_z)
 
-        geo.synchronize()
+    geo.synchronize()
 
-        top_z_surface = extruded[0][1]
-        volume = extruded[1][1]
-        lateral = [tag for dim, tag in extruded[2:]]
+    top_z_surface = extruded[0][1]
+    volume = extruded[1][1]
+    lateral = [tag for dim, tag in extruded[2:]]
 
-        # Classify the lateral surfaces by their bounding boxes
-        wall_surfaces = []
-        left_surface = None
-        right_surface = None
-        top_surfaces = []
+    # Classify the lateral surfaces by their bounding boxes
+    wall_surfaces = []
+    left_surface = None
+    right_surface = None
+    top_surfaces = []
 
-        for s in lateral:
-            xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(2, s)
+    for s in lateral:
+        xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(2, s)
 
-            if abs(xmax - xmin) < 1e-6:
-                # x = 0 or x = L_x
-                if abs(xmin) < 1e-6:
-                    left_surface = s
-                else:
-                    right_surface = s
-            elif abs(ymax - ymin) < 1e-6 and abs(ymin - L_y) < 1e-6:
-                top_surfaces.append(s)
+        if abs(xmax - xmin) < 1e-6:
+            # x = 0 or x = L_x
+            if abs(xmin) < 1e-6:
+                left_surface = s
             else:
-                wall_surfaces.append(s)
+                right_surface = s
+        elif abs(ymax - ymin) < 1e-6 and abs(ymin - L_y) < 1e-6:
+            top_surfaces.append(s)
+        else:
+            wall_surfaces.append(s)
 
-        # Periodicity in x and z (the right / z = L_z surfaces are copies
-        # of the left / z = 0 surfaces), so that the periodic DOFs match
-        gmsh.model.mesh.setPeriodic(
-            2, [right_surface], [left_surface],
-            [1, 0, 0, L_x,
-             0, 1, 0, 0,
-             0, 0, 1, 0,
-             0, 0, 0, 1])
+    # Periodicity in x and z (the right / z = L_z surfaces are copies
+    # of the left / z = 0 surfaces), so that the periodic DOFs match
+    # gmsh.model.mesh.setPeriodic(
+    #     2, [right_surface], [left_surface],
+    #     [1, 0, 0, L_x,
+    #      0, 1, 0, 0,
+    #      0, 0, 1, 0,
+    #      0, 0, 0, 1])
 
-        gmsh.model.mesh.setPeriodic(
-            2, [top_z_surface], [surface],
-            [1, 0, 0, 0,
-             0, 1, 0, 0,
-             0, 0, 1, L_z,
-             0, 0, 0, 1])
+    # gmsh.model.mesh.setPeriodic(
+    #     2, [top_z_surface], [surface],
+    #     [1, 0, 0, 0,
+    #      0, 1, 0, 0,
+    #      0, 0, 1, L_z,
+    #      0, 0, 0, 1])
 
-        # Physical IDs used for boundary conditions
-        gmsh.model.addPhysicalGroup(2, wall_surfaces, 3)
-        
-        gmsh.model.setPhysicalName(2, 3, "wall")
+    # Physical IDs used for boundary conditions
+    gmsh.model.addPhysicalGroup(2, wall_surfaces, 3)
+    
+    gmsh.model.setPhysicalName(2, 3, "wall")
 
-        gmsh.model.addPhysicalGroup(2, [right_surface, left_surface], 4)
-        
-        gmsh.model.setPhysicalName(2, 4, "sides")
+    gmsh.model.addPhysicalGroup(2, [right_surface, left_surface], 4)
+    
+    gmsh.model.setPhysicalName(2, 4, "sides")
 
-        gmsh.model.addPhysicalGroup(2, top_surfaces, 5)
-        
-        gmsh.model.setPhysicalName(2, 5, "top")
+    gmsh.model.addPhysicalGroup(2, top_surfaces, 5)
+    
+    gmsh.model.setPhysicalName(2, 5, "top")
 
-        gmsh.model.addPhysicalGroup(2, [surface, top_z_surface], 6)
-        
-        gmsh.model.setPhysicalName(2, 6, "zfaces")
+    gmsh.model.addPhysicalGroup(2, [surface, top_z_surface], 6)
+    
+    gmsh.model.setPhysicalName(2, 6, "zfaces")
 
-        gmsh.model.addPhysicalGroup(3, [volume], 1)
-        
-        gmsh.model.setPhysicalName(3, 1, "fluid")
+    gmsh.model.addPhysicalGroup(3, [volume], 1)
+    
+    gmsh.model.setPhysicalName(3, 1, "fluid")
 
-        # Generate and save the 3D mesh
-        gmsh.model.mesh.generate(3)
-        gmsh.write(filename)
+    # Generate and save the 3D mesh
+    gmsh.model.mesh.generate(3)
+    gmsh.write(filename)
 
-    finally:
-        gmsh.finalize()
 
     return filename
 
 
-#%% Generate the Gmsh mesh
+#%% Generate the Gmsh mesh (only rank 0)
+mesh_file = "sinusoidal_wall.msh"
 if comm.rank == 0:
     print("\nSTEP 1: Starting mesh generation", flush=True)
-
-mesh_file = create_sinusoidal_mesh(
-    L_x=L_x,
-    L_y=L_y,
-    L_z=L_z,
-    surface_amplitude=1.0,
-    surface_freq=L_x / (8.0 * np.pi),
-    n_surface=40,
-    lc=0.75)
-
-if comm.rank == 0:
+    mesh_file = create_sinusoidal_mesh(
+        L_x=L_x, L_y=L_y, L_z=L_z,
+        surface_amplitude=1.0,
+        surface_freq=L_x / (8.0 * np.pi),
+        n_surface=10,
+        lc=0.75)
     print("\nSTEP 2: Mesh generation completed", flush=True)
 
+MPI.COMM_WORLD.Barrier()
+
+#%% Build grid from meshio (safe in parallel)
 import meshio
 from dune.alugrid import aluConformGrid
 from dune.fem.view import adaptiveLeafGridView
 
-msh = meshio.read(mesh_file)
+if comm.rank == 0:
+    m = meshio.read(mesh_file)
+    # Keep only tetrahedra
+    cells = m.cells_dict.get("tetra")
+    if cells is None:
+        raise RuntimeError("No tetrahedra found in mesh")
+    points = m.points
+    domain = {"vertices": points, "simplices": cells}
+else:
+    domain = None
 
-vertices = np.asarray(msh.points, dtype=float)
-simplices = np.asarray(msh.cells_dict["tetra"], dtype=int)
+# Broadcast the domain description (or let every rank read the file – both work)
+domain = MPI.COMM_WORLD.bcast(domain, root=0)
 
-grid_description = {"vertices": vertices, "simplices": simplices}
-
-grid = aluConformGrid(grid_description, dimgrid=3)
+grid = aluConformGrid(domain, dimgrid=3, lbMethod=9)
 mesh = adaptiveLeafGridView(grid)
+mesh.hierarchicalGrid.loadBalance()
+
 
 #print("Number of elements:", mesh.size(0))
 
@@ -821,61 +826,56 @@ for idx in range(Q):
  
     
 def build_solvers():
-    x_dof = V.interpolate(x[0], name="x_dof").as_numpy.copy()
+    # 1. Local DOF coordinates on this rank
+    x_local = V.interpolate(x[0], name="x_dof").as_numpy.copy()
+    y_local = V.interpolate(x[1], name="y_dof").as_numpy.copy()
+    z_local = V.interpolate(x[2], name="z_dof").as_numpy.copy()
+    N_local = len(x_local)
 
-    y_dof = V.interpolate(x[1], name="y_dof").as_numpy.copy()
+    # 2. Gather coordinates from all ranks
+    x_full = np.concatenate(MPI.COMM_WORLD.allgather(x_local))
+    y_full = np.concatenate(MPI.COMM_WORLD.allgather(y_local))
+    z_full = np.concatenate(MPI.COMM_WORLD.allgather(z_local))
+    N_global = len(x_full)
 
-    z_dof = V.interpolate(x[2], name="z_dof").as_numpy.copy()
+    # 3. Periodicity in x and z on the global coordinate set (y is NOT periodic)
+    x_periodic_global = x_full.copy()
+    x_periodic_global[np.abs(x_periodic_global - L_x) < 1e-10] = 0.0
 
-    N = len(x_dof)
+    z_periodic_global = z_full.copy()
+    z_periodic_global[np.abs(z_periodic_global - L_z) < 1e-10] = 0.0
 
-    # -----------------------------------------------------
-    # x and z periodicity
-    # -----------------------------------------------------
-
-    x_periodic = x_dof.copy()
-
-    x_periodic[np.abs(x_periodic - L_x) < 1e-10] = 0.0
-
-    z_periodic = z_dof.copy()
-
-    z_periodic[np.abs(z_periodic - L_z) < 1e-10] = 0.0
-
-    # -----------------------------------------------------
-    # y is NOT periodic
-    # -----------------------------------------------------
-
-    keys = np.column_stack((np.round(x_periodic, 10),
-                            np.round(y_dof, 10),
-                            np.round(z_periodic, 10)))
-
+    keys = np.column_stack((np.round(x_periodic_global, 10),
+                            np.round(y_full, 10),
+                            np.round(z_periodic_global, 10)))
     unique_keys, inverse = np.unique(keys, axis=0, return_inverse=True)
-
     nPeriodic = len(unique_keys)
 
-    rows = np.arange(N)
-    cols = inverse
-    data = np.ones(N)
+    # 4. Global projection matrix (N_global x nPeriodic)
+    P_global = scipy.sparse.coo_matrix(
+        (np.ones(N_global), (np.arange(N_global), inverse.ravel())),
+        shape=(N_global, nPeriodic)).tocsr()
 
-    P = scipy.sparse.coo_matrix((data, (rows, cols)),
-                                shape=(N, nPeriodic)).tocsr()
-    
-    sysMatStream = []
-    sysMatColl = []
+    # 5. Local slice of P for this rank
+    local_sizes = MPI.COMM_WORLD.allgather(N_local)
+    start_idx = sum(local_sizes[:comm.rank])
+    end_idx = start_idx + N_local
+    P_local = P_global[start_idx:end_idx, :]
 
-    massMatConsistent = scipy.sparse.csr_matrix(
-    dune.fem.operator.galerkin(f_trial * v * ufl.dx).linear().as_numpy)
+    # 6. Lumped mass: use the same lumpOp as in 2D, not the row sums of the
+    #    assembled consistent matrix (that matrix is rank-local in parallel)
+    lumpOp = dune.fem.operator.galerkin(1.0 * v * ufl.dx - f_trial * v * ufl.dx)
+    lumpVec = V.zero.copy()
+    lumpOp(zeroFn, lumpVec)
 
-    # Full-space lumped mass diagonal
-    mass_diag = np.asarray(massMatConsistent.sum(axis=1)).ravel()
-    
-    # Periodic lumped mass diagonal
-    mass_diag_periodic = np.asarray(P.T @ mass_diag).ravel()
-    
+    mass_diag_local = lumpVec.as_numpy.copy()
+    mass_diag_global = np.concatenate(MPI.COMM_WORLD.allgather(mass_diag_local))
+    mass_diag_periodic = np.asarray(P_global.T @ mass_diag_global).ravel()
+
     if np.any(mass_diag_periodic <= 0):
         raise ValueError("Periodic lumped mass contains non-positive entries")
-    
-    return P, mass_diag, mass_diag_periodic
+
+    return P_local, mass_diag_local, mass_diag_periodic
 
 P, mass_diag, mass_diag_periodic = build_solvers()
 
@@ -906,7 +906,7 @@ for n in range(numSteps):
         b_full = rhsVecCollision[idx].as_numpy
     
         # Reduce RHS to periodic space
-        b_periodic = P.T @ b_full
+        b_periodic = comm.sum(P.T @ b_full)
     
         # Solve periodic system
         f_star_periodic = b_periodic / mass_diag_periodic
@@ -923,7 +923,7 @@ for n in range(numSteps):
         streamingOps[idx](zeroFn, rhsVecStreaming[idx])
     
         b_full = rhsVecStreaming[idx].as_numpy
-        b_periodic = P.T @ b_full
+        b_periodic = comm.sum( P.T @ b_full )
         f_n_periodic = b_periodic / mass_diag_periodic
     
         f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
@@ -948,7 +948,7 @@ for n in range(numSteps):
     #print("about to solve for phi, mu")
     b_phi_full = rhs_AC_fn.as_numpy
 
-    b_phi_periodic = P.T @ b_phi_full
+    b_phi_periodic = comm.sum( P.T @ b_phi_full )
 
     phi_periodic = b_phi_periodic / mass_diag_periodic
 
@@ -956,7 +956,7 @@ for n in range(numSteps):
     
     b_mu_full = rhs_Mu_fn.as_numpy
 
-    b_mu_periodic = P.T @ b_mu_full
+    b_mu_periodic = comm.sum( P.T @ b_mu_full )
 
     mu_periodic = b_mu_periodic / mass_diag_periodic
 
@@ -1015,7 +1015,7 @@ for n in range(numSteps):
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 50 == 0:
+    if n % 100 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)

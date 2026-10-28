@@ -1,6 +1,6 @@
 import os
 os.environ["DUNE_LOG_LEVEL"] = "ERROR"
-
+from mpi4py import MPI
 from scipy.sparse import linalg
 from math import sqrt
 import matplotlib.pyplot as plt
@@ -15,10 +15,9 @@ import numpy as np
 import os
 import time
 from collections import defaultdict
-
-
-
+from dune.common import comm
 import ufl
+from mpi4py import MPI
 
 R0 = 2
 initDropDiam = 2*R0
@@ -26,7 +25,7 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 30
+theta_deg = 70
 theta = theta_deg * np.pi / 180
 
 Q = 9
@@ -111,65 +110,64 @@ def create_sinusoidal_mesh(
 
     gmsh.initialize()
 
-    try:
-        gmsh.option.setNumber("General.Terminal", 1)
-        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
 
-        gmsh.model.add("sinusoidal_wall")
+    gmsh.model.add("sinusoidal_wall")
 
-        geo = gmsh.model.geo
+    geo = gmsh.model.geo
 
-        # Bottom boundary points
-        bottom_points = [
-            geo.addPoint(float(x), float(y), 0.0, lc)
-            for x, y in zip(xs, ys)
-        ]
+    # Bottom boundary points
+    bottom_points = [
+        geo.addPoint(float(x), float(y), 0.0, lc)
+        for x, y in zip(xs, ys)
+    ]
 
-        # Top corners
-        top_right = geo.addPoint(L_x, L_y, 0.0, lc)
-        top_left = geo.addPoint(0.0, L_y, 0.0, lc)
+    # Top corners
+    top_right = geo.addPoint(L_x, L_y, 0.0, lc)
+    top_left = geo.addPoint(0.0, L_y, 0.0, lc)
 
-        # Bottom boundary segments
-        wall_lines = [geo.addLine(bottom_points[i],
-                                  bottom_points[i + 1]) for i in range(n_surface)]
+    # Bottom boundary segments
+    wall_lines = [geo.addLine(bottom_points[i],
+                              bottom_points[i + 1]) for i in range(n_surface)]
 
-        # Right, top, and left boundaries
-        right_line = geo.addLine(bottom_points[-1], top_right)
+    # Right, top, and left boundaries
+    right_line = geo.addLine(bottom_points[-1], top_right)
 
-        top_line = geo.addLine(top_right, top_left)
+    top_line = geo.addLine(top_right, top_left)
 
-        left_line = geo.addLine(top_left, bottom_points[0])
+    left_line = geo.addLine(top_left, bottom_points[0])
 
-        # Enclosed fluid domain
-        loop = geo.addCurveLoop(wall_lines + [right_line, top_line, left_line])
+    # Enclosed fluid domain
+    loop = geo.addCurveLoop(wall_lines + [right_line, top_line, left_line])
 
-        surface = geo.addPlaneSurface([loop])
+    surface = geo.addPlaneSurface([loop])
 
-        geo.synchronize()
+    geo.synchronize()
 
-        # Physical IDs used for boundary conditions
-        gmsh.model.addPhysicalGroup(1, wall_lines, 3)
-        
-        gmsh.model.setPhysicalName(1, 3, "wall")
+    # Physical IDs used for boundary conditions
+    gmsh.model.addPhysicalGroup(1, wall_lines, 3)
+    
+    gmsh.model.setPhysicalName(1, 3, "wall")
 
-        gmsh.model.addPhysicalGroup(1, [right_line, left_line], 4)
-        
-        gmsh.model.setPhysicalName(1, 4, "sides")
+    gmsh.model.addPhysicalGroup(1, [right_line, left_line], 4)
+    
+    gmsh.model.setPhysicalName(1, 4, "sides")
 
-        gmsh.model.addPhysicalGroup(1, [top_line], 5)
-        
-        gmsh.model.setPhysicalName(1, 5, "top")
+    gmsh.model.addPhysicalGroup(1, [top_line], 5)
+    
+    gmsh.model.setPhysicalName(1, 5, "top")
 
-        gmsh.model.addPhysicalGroup(2, [surface], 1)
-        
-        gmsh.model.setPhysicalName(2, 1, "fluid")
+    gmsh.model.addPhysicalGroup(2, [surface], 1)
+    
+    gmsh.model.setPhysicalName(2, 1, "fluid")
 
-        # Generate and save the 2D mesh
-        gmsh.model.mesh.generate(2)
-        gmsh.write(filename)
+    # Generate and save the 2D mesh
+    gmsh.model.mesh.generate(2)
+    gmsh.write(filename)
 
-    finally:
-        gmsh.finalize()
+    # finally:
+    #     gmsh.finalize()
 
     return filename
 
@@ -178,13 +176,21 @@ def create_sinusoidal_mesh(
 
 print("\nSTEP 1: Starting mesh generation", flush=True)
 
-mesh_file = create_sinusoidal_mesh(
-    L_x=L_x,
-    L_y=L_y,
-    surface_amplitude=1.4,
-    surface_freq=L_x / (8.0 * np.pi),
-    n_surface=40,
-    lc=0.3)
+mpi_comm = MPI.COMM_WORLD
+
+mesh_file = "sinusoidal_wall.msh"
+
+if mpi_comm.rank == 0: 
+    create_sinusoidal_mesh(
+        L_x=L_x,
+        L_y=L_y,
+        surface_amplitude=1.4,
+        surface_freq=L_x / (8.0 * np.pi),
+        n_surface=40,
+        lc=0.3)
+    gmsh.finalize()
+
+mpi_comm.Barrier()    
 
 print("\nSTEP 2: Mesh generation completed", flush=True)
 
@@ -193,14 +199,17 @@ print("\nSTEP 2: Mesh generation completed", flush=True)
 from dune.grid import reader
 from dune.alugrid import aluConformGrid
 from dune.fem.view import adaptiveLeafGridView
+import meshio
 
-grid_description = (reader.gmsh, mesh_file)
+m = meshio.read("sinusoidal_wall.msh")
+vertices = m.points[:, :2]
+simplices = m.cells_dict["triangle"]
 
-grid = aluConformGrid(grid_description, dimgrid=2)
+grid = aluConformGrid({"vertices": vertices, "simplices": simplices}, dimgrid=2)
+print("ok", grid.size(0))
 mesh = adaptiveLeafGridView(grid)
+mesh.hierarchicalGrid.loadBalance()
 
-from dune.fem.function import boundaryFunction
-boundaryFunction(grid).plot()
 
 h_min = np.inf
 
@@ -217,7 +226,7 @@ for element in mesh.elements:
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.003
+dt = 0.01*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.1*dt_c
 numSteps = int(Tfinal/dt)
@@ -252,6 +261,8 @@ x = ufl.SpatialCoordinate(V)
 print("\nSTEP 9: Finite-element space created successfully", flush=True)
 
 #%% Compute boundary DOF normals
+
+
 
 def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
     """
@@ -332,25 +343,6 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
 
 bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
-h_min = np.inf
-
-for element in mesh.elements:
-    corners = np.asarray(element.geometry.corners)
-
-    h_element = max(np.linalg.norm(a - b)
-        for i, a in enumerate(corners)
-        for b in corners[i + 1:])
-
-    h_min = min(h_min, h_element)
-
-h_min = h_min*(1/2**3)
-
-Tfinal = 1500
-dt = 0.05*h_min 
-beta_mass_diff = 0.1*dt
-numSteps = int(Tfinal/dt)
-# Corresponding weights
-
 
 
 #%% Create function space and finite-element functions for the solution
@@ -392,16 +384,9 @@ forceDensity = -phi_n * ufl.grad(mu_n)
 t = dune.ufl.Constant(0.0)
 
 
-def bnd_len(bid=None):
-    form = f_trial*v*(ufl.ds if bid is None else ufl.ds(bid))
-    return dune.fem.assemble(form).as_numpy.sum()
-
-print("total boundary :", bnd_len())
-for bid in range(0, 8):
-    try:
-        print(f"ds({bid}) =", bnd_len(bid))
-    except Exception as e:
-        print(f"ds({bid}) failed:", type(e).__name__)
+#total = bnd_len()
+#if comm.rank == 0:
+#    print("total boundary (rank 0 part):", total)
 
 
 #%% Define functions to compute density, velocity, body force
@@ -469,7 +454,8 @@ def body_Force(vel, vel_idx, Force_density):
 
 
 for idx in range(Q):
-    print("idx = ", idx)
+    if comm.rank == 0:
+        print("idx = ", idx)
     f_n.append( V.interpolate(
         fEquilInit(idx),
         name=f"f_n{idx}") )
@@ -524,35 +510,24 @@ def trackCL(phi_n, dof_coordinates, h):
     candidates = coords[mask]
     candidate_values = values[mask]
 
-    if len(candidates) < 2:
+    if comm.sum(float(len(candidates))) < 2:
         raise ValueError(
             "Not enough interface points to estimate the contact line."
         )
 
     # Exclude points near the left contact line.
-    min_x = candidates[:, 0].min()
+    min_x = comm.min(candidates[:, 0].min() if len(candidates) else np.inf)
     keep_rightCL = candidates[:, 0] > min_x + 7 * h
-    
-    max_x = candidates[:, 0].max()
+
+    max_x = comm.max(candidates[:, 0].max() if len(candidates) else -np.inf)
     keep_leftCL = candidates[:, 0] < max_x - 7*h
 
     candidates_rightCL = candidates[keep_rightCL]
-    candidate_values_rightCL = candidate_values[keep_rightCL]
-    
     candidates_leftCL = candidates[keep_leftCL]
-    candidate_values_leftCL = candidate_values[keep_leftCL]
 
-
-
-    # Leftmost and rightmost remaining points.
-    left_idx = np.argmin(candidates_leftCL[:, 0])
-    right_idx = np.argmax(candidates_rightCL[:, 0])
-
-    left_x = candidates_leftCL[left_idx, 0]
-    left_phi = candidate_values_leftCL[left_idx]
-
-    right_x = candidates_rightCL[right_idx, 0]
-    right_phi = candidate_values_rightCL[right_idx]
+    # Leftmost and rightmost remaining points (global).
+    left_x = comm.min(candidates_leftCL[:, 0].min() if len(candidates_leftCL) else np.inf)
+    right_x = comm.max(candidates_rightCL[:, 0].max() if len(candidates_rightCL) else -np.inf)
 
     return left_x, right_x
 
@@ -577,7 +552,7 @@ def computeContactAngle(c_n, h, Cn, mesh):
                 value = float(np.asarray(local_c(local_point)).reshape(-1)[0])
 
                 # Keep points near the substrate and interface
-                if midpoint[1] >= 2*h:
+                if midpoint[1] >= 5*h:
                     continue
                 if not (-0.5 < value < 0.5):
                     continue
@@ -598,19 +573,21 @@ def computeContactAngle(c_n, h, Cn, mesh):
     finally:
         pass
 
-    if not angles:
+    n_angles = comm.sum(float(len(angles)))
+    if n_angles == 0:
         raise ValueError(
             "No valid interfacial points found near the substrate."
         )
 
     # Preserve the original exclusion of the left contact line.
     # For that exclusion, store (midpoint, angle) pairs before averaging.
-    return np.degrees(np.mean(angles))
+    return np.degrees(comm.sum(float(np.sum(angles))) / n_angles)
 
     
 #%% Define BCs
 
-print("starting to create BCs\n\n")
+if comm.rank == 0:
+    print("starting to create BCs\n\n", flush=True)
 
 u_D = 1
 
@@ -630,7 +607,8 @@ topFn = V.interpolate(
 bottomDoFs = np.where(bottomFn.as_numpy != 0)[0]
 topDoFs = np.where(topFn.as_numpy != 0)[0]
     
-print("done making BCs\n\n")
+if comm.rank == 0:
+    print("done making BCs\n\n", flush=True)
 
 def wall_dofs():
     y = V.interpolate(x[1], name="y_dof").as_numpy
@@ -652,14 +630,16 @@ linear_forms_collision = []
 bilin_form_AC = phi_trial * v * ufl.dx
 bilin_form_mu = mu_trial * v * ufl.dx
 
-print("going to create ufl functions for density, vel, velStar \n\n")
+if comm.rank == 0:
+    print("going to create ufl functions for density, vel, velStar \n\n", flush=True)
 
 density = getDens(f_n)
 velocity_n = getVel(f_n, forceDensity)
 velStar_n = getVel(f_star, forceDensity)
 velSquared = ufl.inner(velocity_n, velocity_n)
 
-print("about to start making AC forms \n\n")
+if comm.rank == 0:
+    print("about to start making AC forms \n\n", flush=True)
 
 lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
     - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
@@ -677,9 +657,10 @@ lin_form_mu = A*phi_n*(phi_n**2 - 1)*v*ufl.dx \
 
 wall_len  = dune.fem.assemble(f_trial*v*wall_ind*ufl.ds).as_numpy.sum()
 total_len = dune.fem.assemble(f_trial*v*ufl.ds).as_numpy.sum()
-print("wall:", wall_len, " rest:", total_len - wall_len)   # expect ~17.9 and 24.0
 
-print("finished making AC forms \n\n")
+if comm.rank == 0:
+    print("finished making AC forms \n\n", flush=True)
+    
 opp_idx = {0: 0, 1: 3, 2: 4, 3: 1, 4: 2, 5: 7, 6: 8, 7: 5, 8: 6}
 
 for idx in range(Q):
@@ -710,7 +691,8 @@ for idx in range(Q):
     linear_forms_stream.append(lin_form_idx)
     linear_forms_collision.append(lin_form_coll)
     
-print("finished making LB forms\n\n")
+if comm.rank == 0:
+    print("finished making LB forms\n\n", flush=True)
 
 # Assemble matrices for first step
 sysMatStream = []
@@ -766,53 +748,56 @@ for idx in range(Q):
  
     
 def build_solvers():
-    x_dof = V.interpolate(x[0], name="x_dof").as_numpy.copy()
+    # 1. Get local DOF coordinates on this rank
+    x_local = V.interpolate(x[0], name="x_dof").as_numpy.copy()
+    y_local = V.interpolate(x[1], name="y_dof").as_numpy.copy()
+    N_local = len(x_local)
 
-    y_dof = V.interpolate(x[1], name="y_dof").as_numpy.copy()
+    # 2. Gather coordinates from all ranks globally using mpi4py
+    x_global_list = MPI.COMM_WORLD.allgather(x_local)
+    y_global_list = MPI.COMM_WORLD.allgather(y_local)
 
-    N = len(x_dof)
+    x_full = np.concatenate(x_global_list)
+    y_full = np.concatenate(y_global_list)
+    N_global = len(x_full)
 
-    # -----------------------------------------------------
-    # x periodicity only
-    # -----------------------------------------------------
+    # 3. Apply periodicity on the global coordinate set
+    x_periodic_global = x_full.copy()
+    x_periodic_global[np.abs(x_periodic_global - L_x) < 1e-10] = 0.0
 
-    x_periodic = x_dof.copy()
-
-    x_periodic[np.abs(x_periodic - L_x) < 1e-10] = 0.0
-
-    # -----------------------------------------------------
-    # y is NOT periodic
-    # -----------------------------------------------------
-
-    keys = np.column_stack((np.round(x_periodic, 10), np.round(y_dof, 10)))
-
+    keys = np.column_stack((np.round(x_periodic_global, 10), np.round(y_full, 10)))
     unique_keys, inverse = np.unique(keys, axis=0, return_inverse=True)
-
     nPeriodic = len(unique_keys)
 
-    rows = np.arange(N)
-    cols = inverse
-    data = np.ones(N)
+    # 4. Build the GLOBAL projection matrix P_global (shape: N_global x nPeriodic)
+    rows_global = np.arange(N_global)
+    cols_global = inverse
+    data_global = np.ones(N_global)
+    P_global = scipy.sparse.coo_matrix((data_global, (rows_global, cols_global)), shape=(N_global, nPeriodic)).tocsr()
 
-    P = scipy.sparse.coo_matrix((data, (rows, cols)),
-                                shape=(N, nPeriodic)).tocsr()
-    
-    sysMatStream = []
-    sysMatColl = []
+    # 5. Determine which global indices belong to this local rank
+    local_sizes = MPI.COMM_WORLD.allgather(N_local)
+    start_idx = sum(local_sizes[:comm.rank])
+    end_idx = start_idx + N_local
 
-    massMatConsistent = scipy.sparse.csr_matrix(
-    dune.fem.operator.galerkin(f_trial * v * ufl.dx).linear().as_numpy)
+    # Extract the local slice of P for this rank
+    P_local = P_global[start_idx:end_idx, :]
 
-    # Full-space lumped mass diagonal
-    mass_diag = np.asarray(massMatConsistent.sum(axis=1)).ravel()
-    
-    # Periodic lumped mass diagonal
-    mass_diag_periodic = np.asarray(P.T @ mass_diag).ravel()
-    
+    # 6. Handle lumped mass diagonal globally and slice it locally
+    lumpOp = dune.fem.operator.galerkin(1.0 * v * ufl.dx - f_trial * v * ufl.dx)
+    lumpVec = V.zero.copy()
+    lumpOp(zeroFn, lumpVec)
+
+    mass_diag_local = lumpVec.as_numpy.copy()
+    mass_diag_global = np.concatenate(MPI.COMM_WORLD.allgather(mass_diag_local))
+
+    # Periodic lumped mass diagonal computed globally, then used locally
+    mass_diag_periodic = np.asarray(P_global.T @ mass_diag_global).ravel()
+
     if np.any(mass_diag_periodic <= 0):
         raise ValueError("Periodic lumped mass contains non-positive entries")
-    
-    return P, mass_diag, mass_diag_periodic
+
+    return P_local, mass_diag_local, mass_diag_periodic
 
 P, mass_diag, mass_diag_periodic = build_solvers()
 
@@ -821,8 +806,11 @@ bottomDoFs, topDoFs = wall_dofs()
 
 #%% Time-stepping 
 
-print("about to start time-stepping\n\n")
+if comm.rank == 0:
+    print("about to start time-stepping\n\n", flush=True)
+    
 for n in range(numSteps):
+    
     
     #print("n = ", n)
 
@@ -841,7 +829,7 @@ for n in range(numSteps):
         b_full = rhsVecCollision[idx].as_numpy
     
         # Reduce RHS to periodic space
-        b_periodic = P.T @ b_full
+        b_periodic = comm.sum(P.T @ b_full)
     
         # Solve periodic system
         f_star_periodic = b_periodic / mass_diag_periodic
@@ -858,7 +846,7 @@ for n in range(numSteps):
         streamingOps[idx](zeroFn, rhsVecStreaming[idx])
     
         b_full = rhsVecStreaming[idx].as_numpy
-        b_periodic = P.T @ b_full
+        b_periodic = comm.sum(P.T @ b_full)
         f_n_periodic = b_periodic / mass_diag_periodic
     
         f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
@@ -883,7 +871,7 @@ for n in range(numSteps):
     #print("about to solve for phi, mu")
     b_phi_full = rhs_AC_fn.as_numpy
 
-    b_phi_periodic = P.T @ b_phi_full
+    b_phi_periodic = comm.sum(P.T @ b_phi_full)
 
     phi_periodic = b_phi_periodic / mass_diag_periodic
 
@@ -891,7 +879,7 @@ for n in range(numSteps):
     
     b_mu_full = rhs_Mu_fn.as_numpy
 
-    b_mu_periodic = P.T @ b_mu_full
+    b_mu_periodic = comm.sum(P.T @ b_mu_full)
 
     mu_periodic = b_mu_periodic / mass_diag_periodic
 
@@ -916,7 +904,7 @@ for n in range(numSteps):
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=2)
+            maxLevel=5)
     
         dune.fem.gridAdapt(
             marker,
@@ -952,21 +940,25 @@ for n in range(numSteps):
     
     if n % 50 == 0:
         
-        print("n = ", n, "writing to file")
+        if comm.rank == 0:
+            print("n = ", n, "writing to file", flush=True)
         #print("mass_diff type:", type(mass_diff))
         
         #print("mass_n type:", type(mass_n), "\n\n")
         
         if n > 3000:
-            theta_avg = computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
-            print("theta = ", theta_avg)
+            theta_avg = 1#computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
+            
+            if comm.rank == 0:
+                print("theta = ", theta_avg, flush=True)
             
             xh = V.interpolate(x[0], name="x")
             yh = V.interpolate(x[1], name="y")
             dof_coords = np.column_stack([xh.as_numpy, yh.as_numpy])  
-            left_cl, right_cl = trackCL(phi_n, dof_coords, h_min)
+            left_cl, right_cl = 1, 1 #trackCL(phi_n, dof_coords, h_min)
             
-            print("left_cl = ", left_cl, " right_cl = ", right_cl)
+            if comm.rank == 0:
+                print("left_cl = ", left_cl, " right_cl = ", right_cl, flush=True)
         
         vel_expr = getVel(f_n, forceDensity)
         vel3.interpolate(ufl.as_vector([vel_expr[0], vel_expr[1], 0]))
@@ -975,11 +967,12 @@ for n in range(numSteps):
 
         vel_mag = np.linalg.norm(v_array, axis=1)
         
-        print("Min speed:", vel_mag.min())
-        print("Max speed:", vel_mag.max())
-        
-        print("Max KE:", vel_mag.max()**2)
-        
+        if comm.rank == 0:
+            print("Min speed:", vel_mag.min(), flush=True)
+            print("Max speed:", vel_mag.max(), flush=True)
+            
+            print("Max KE:", vel_mag.max()**2, flush=True)
+            
         if n > 3000:
             log_file.write(f"{n:15d}"
                         f"{right_cl:15.3f}"
