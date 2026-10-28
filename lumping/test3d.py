@@ -16,6 +16,8 @@ import os
 import time
 from collections import defaultdict
 from dune.common import comm
+from mpi4py import MPI
+mpi_comm = MPI.COMM_WORLD
 
 
 
@@ -248,7 +250,7 @@ if comm.rank == 0:
         surface_amplitude=1.0,
         surface_freq=L_x / (8.0 * np.pi),
         n_surface=40,
-        lc=0.75)
+        lc=0.5)
     print("\nSTEP 2: Mesh generation completed", flush=True)
 
 MPI.COMM_WORLD.Barrier()
@@ -258,21 +260,15 @@ import meshio
 from dune.alugrid import aluConformGrid
 from dune.fem.view import adaptiveLeafGridView
 
-if comm.rank == 0:
-    m = meshio.read(mesh_file)
-    # Keep only tetrahedra
-    cells = m.cells_dict.get("tetra")
-    if cells is None:
-        raise RuntimeError("No tetrahedra found in mesh")
-    points = m.points
-    domain = {"vertices": points, "simplices": cells}
+if mpi_comm.rank == 0:
+    m = meshio.read("sinusoidal_wall.msh")
+    vertices = m.points[:, :3]
+    simplices = m.cells_dict["tetra"]
 else:
-    domain = None
+    vertices = np.zeros((0, 3))
+    simplices = np.zeros((0, 4), dtype=np.int64)
 
-# Broadcast the domain description (or let every rank read the file – both work)
-domain = MPI.COMM_WORLD.bcast(domain, root=0)
-
-grid = aluConformGrid(domain, dimgrid=3, lbMethod=9)
+grid = aluConformGrid({"vertices": vertices, "simplices": simplices}, dimgrid=3)
 mesh = adaptiveLeafGridView(grid)
 mesh.hierarchicalGrid.loadBalance()
 
@@ -297,7 +293,7 @@ for element in mesh.elements:
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.025*h_min
+dt = 0.125*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
 numSteps = int(Tfinal/dt)
@@ -774,17 +770,6 @@ if comm.rank == 0:
 
 # Assemble matrices for first step
 sysMatStream = []
-sysMatColl = []
-for idx in range(Q):
-    #sysMatStream.append(dune.fem.assemble(bilinFormsStream[idx]))
-    if xi_values[idx][1] == 0:
-        sysMatStream.append(dune.fem.assemble(bilinFormsStream[idx]))
-    elif xi_values[idx][1] > 0:
-        sysMatStream.append(dune.fem.assemble([bilinFormsStream[idx], dbcBottom]))
-    else:
-        sysMatStream.append(dune.fem.assemble([bilinFormsStream[idx], dbcTop]))
-        
-    sysMatColl.append(dune.fem.assemble(bilinFormsColl[idx]))
  
 rhsVecStreaming = []
 rhsVecCollision = []
@@ -808,18 +793,14 @@ rhs_Mu_fn = V.zero.copy()
 
 zeroFn = V.zero.copy()
     
-    
-    
-sysMatCollNumpy = sysMatColl[0].as_numpy 
-collSolver = scipy.sparse.linalg.factorized(sysMatCollNumpy)
 
 streamSolvers = []
 f_nP1_arrays = []
 f_n_arrays = []
 f_star_arrays= []
 for idx in range(Q):
-    sysMatStreamNumpy = sysMatStream[idx].as_numpy
-    streamSolvers.append(scipy.sparse.linalg.factorized(sysMatStreamNumpy))
+    #sysMatStreamNumpy = sysMatStream[idx].as_numpy
+    #streamSolvers.append(scipy.sparse.linalg.factorized(sysMatStreamNumpy))
     f_nP1_arrays.append(f_nP1[idx].as_numpy)
     f_n_arrays.append(f_n[idx].as_numpy)
     f_star_arrays.append(f_star[idx].as_numpy)
@@ -1015,7 +996,7 @@ for n in range(numSteps):
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 100 == 0:
+    if n % 1 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
