@@ -145,7 +145,7 @@ if comm.rank == 0:
     # The 2D sizes (0.025R / 0.05R) would give tens of millions of tets in 3D,
     # so these are coarser. Lower them as far as memory allows.
     create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
-                                h_fine=0.2*radius, h_coarse=0.6*radius,
+                                h_fine=0.1*radius, h_coarse=0.4*radius,
                                 periodic_x=True, periodic_z=True,
                                 filename=mesh_file)
     print("\nSTEP 2: Mesh generation completed", flush=True)
@@ -192,7 +192,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.1
+dt_mult_fac = 0.01
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c

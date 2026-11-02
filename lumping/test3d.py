@@ -247,10 +247,10 @@ if comm.rank == 0:
     print("\nSTEP 1: Starting mesh generation", flush=True)
     mesh_file = create_sinusoidal_mesh(
         L_x=L_x, L_y=L_y, L_z=L_z,
-        surface_amplitude=1.0,
+        surface_amplitude=0.0,
         surface_freq=L_x / (8.0 * np.pi),
-        n_surface=30,
-        lc=0.3)
+        n_surface=15,
+        lc=1)
     print("\nSTEP 2: Mesh generation completed", flush=True)
 
 MPI.COMM_WORLD.Barrier()
@@ -294,7 +294,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.001*h_min
+dt = 0.05*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
 numSteps = int(Tfinal/dt)
@@ -542,99 +542,191 @@ def evaluate_at(u, gridView, point):
 
 
 # Function to track contact line
-def trackCL(phi_n, dof_coordinates, h):
-    """
-    Estimate the left and right contact-line positions (in x) from
-    nodal values of phi_n.
 
-    Parameters
-    ----------
-    phi_n : DUNE-FemPy discrete function
-        Order parameter.
-    dof_coordinates : array-like, shape (N, 3)
-        Coordinates corresponding to phi_n.as_numpy, in the same DOF order.
-    h : float
-        Mesh length scale used for filtering.
+def trackCL(phi_n, dof_coordinates, h=None, z_mid=None):
     """
-    values = np.asarray(phi_n.as_numpy).reshape(-1)
+    Find contact-line positions from zero crossings of phi
+    along the substrate in the middle z-plane.
+
+    Uses linear interpolation between wall DOFs.
+    MPI-compatible.
+    """
+
     coords = np.asarray(dof_coordinates)
+    values = np.asarray(phi_n.as_numpy).reshape(-1)
 
-    # Restrict to the lower part of the domain.
-    mask = coords[:, 1] < 4 * h
+    if z_mid is None:
+        z_mid = L_z / 2
 
-    # Select approximate interface points.
-    mask &= (values > -0.2) & (values < 0.2)
+    # Gather coordinates and phi values from all MPI ranks
+    all_data = MPI.COMM_WORLD.allgather((coords, values))
 
-    candidates = coords[mask]
-    candidate_values = values[mask]
+    coords = np.concatenate([d[0] for d in all_data])
+    values = np.concatenate([d[1] for d in all_data])
 
-    if len(candidates) < 2:
+    # Select the actual mesh plane closest to the domain midpoint
+    z_levels = np.unique(np.round(coords[:, 2], 10))
+    z_slice = z_levels[np.argmin(np.abs(z_levels - z_mid))]
+
+    # Select DOFs on the substrate and middle z-plane
+    wall_mask = np.abs(coords[:, 1]) < 1e-8
+    slice_mask = np.isclose(
+        coords[:, 2], z_slice, atol=1e-9, rtol=0
+    )
+
+    mask = wall_mask & slice_mask
+
+    x_wall = coords[mask, 0]
+    phi_wall = values[mask]
+
+    if len(x_wall) < 2:
         raise ValueError(
-            "Not enough interface points to estimate the contact line."
+            f"Not enough wall DOFs in middle slice: {len(x_wall)}"
         )
 
-    # Exclude points near the left contact line.
-    min_x = candidates[:, 0].min()
-    keep_rightCL = candidates[:, 0] > min_x + 7 * h
-    
-    max_x = candidates[:, 0].max()
-    keep_leftCL = candidates[:, 0] < max_x - 7*h
+    # Sort wall DOFs by x-coordinate
+    order = np.argsort(x_wall)
+    x_wall = x_wall[order]
+    phi_wall = phi_wall[order]
 
-    candidates_rightCL = candidates[keep_rightCL]
-    candidate_values_rightCL = candidate_values[keep_rightCL]
-    
-    candidates_leftCL = candidates[keep_leftCL]
-    candidate_values_leftCL = candidate_values[keep_leftCL]
+    # Remove duplicate x-coordinates (e.g. shared MPI DOFs)
+    unique_x, inverse = np.unique(
+        np.round(x_wall, 10), return_inverse=True
+    )
 
+    phi_sum = np.zeros(len(unique_x))
+    counts = np.zeros(len(unique_x))
 
+    np.add.at(phi_sum, inverse, phi_wall)
+    np.add.at(counts, inverse, 1)
 
-    # Leftmost and rightmost remaining points.
-    left_idx = np.argmin(candidates_leftCL[:, 0])
-    right_idx = np.argmax(candidates_rightCL[:, 0])
+    phi_unique = phi_sum / counts
+    x_wall = unique_x
+    phi_wall = phi_unique
 
-    left_x = candidates_leftCL[left_idx, 0]
-    left_phi = candidate_values_leftCL[left_idx]
+    # Find zero crossings by linear interpolation
+    crossings = []
 
-    right_x = candidates_rightCL[right_idx, 0]
-    right_phi = candidate_values_rightCL[right_idx]
+    for i in range(len(x_wall) - 1):
+
+        x1, x2 = x_wall[i], x_wall[i + 1]
+        p1, p2 = phi_wall[i], phi_wall[i + 1]
+
+        # Exact zero at a mesh DOF
+        if abs(p1) < 1e-12:
+            crossings.append(x1)
+
+        # Sign change between neighbouring DOFs
+        elif p1 * p2 < 0:
+            x_zero = x1 - p1 * (x2 - x1) / (p2 - p1)
+            crossings.append(x_zero)
+
+    # Check the final DOF for an exact zero
+    if abs(phi_wall[-1]) < 1e-12:
+        crossings.append(x_wall[-1])
+
+    crossings = np.unique(np.round(crossings, 10))
+
+    if len(crossings) < 2:
+        raise ValueError(
+            f"Could not find two contact lines. "
+            f"z_slice={z_slice:.6f}, "
+            f"wall DOFs={len(x_wall)}, "
+            f"zero crossings={len(crossings)}, "
+            f"phi range=({phi_wall.min():.6f}, "
+            f"{phi_wall.max():.6f})."
+        )
+
+    # The two outermost zero crossings
+    left_x = crossings[0]
+    right_x = crossings[-1]
 
     return left_x, right_x
 
 
+
 # Function to compute contact angle 
-def computeContactAngle(c_n, h, Cn, mesh):
+
+def computeContactAngle(c_n, h, Cn, mesh, z_mid=None, z_tol=None):
+    """
+    Compute the contact angle using a 2D slice through
+    the middle of the 3D domain.
+
+    Parameters
+    ----------
+    c_n : DUNE-FemPy discrete function
+        Order parameter.
+    h : float
+        Mesh length scale.
+    Cn : float
+        Interface thickness (retained for compatibility).
+    mesh : DUNE mesh
+        Computational mesh.
+    z_mid : float
+        Location of the middle slice.
+    z_tol : float
+        Half-width of the slab around the middle slice.
+    """
+
     angles = []
-    n_vec = np.array([0.0, -1.0, 0.0])
+
+    if z_mid is None:
+        z_mid = L_z / 2
+
+    if z_tol is None:
+        z_tol = h
 
     local_c = c_n.localFunction()
 
     try:
         for element in mesh.elements:
+
             geometry = element.geometry
 
-            # Physical element centre and its reference coordinate
+            # Physical element centre
             midpoint = np.asarray(geometry.center, dtype=float)
+
+            # Select elements close to the middle z-plane
+            if abs(midpoint[2] - z_mid) >= z_tol:
+                continue
+
             local_point = geometry.toLocal(midpoint.tolist())
 
             local_c.bind(element)
+
             try:
-                value = float(np.asarray(local_c(local_point)).reshape(-1)[0])
+                value = float(
+                    np.asarray(local_c(local_point)).reshape(-1)[0]
+                )
 
                 # Keep points near the substrate and interface
-                if midpoint[1] >= 2*h:
-                    continue
-                if not (-0.5 < value < 0.5):
+                if midpoint[1] >= 5 * h:
                     continue
 
-                # Gradient with respect to physical coordinates
-                grad_c = np.asarray(local_c.jacobian(local_point)).reshape(-1)
+                if not (-0.3 < value < 0.3):
+                    continue
 
-                grad_norm = np.linalg.norm(grad_c)
+                # Gradient in physical coordinates
+                grad_c = np.asarray(
+                    local_c.jacobian(local_point)
+                ).reshape(-1)
+
+                # Only use x and y components for the 2D slice
+                grad_xy = grad_c[:2]
+
+                grad_norm = np.linalg.norm(grad_xy)
+
                 if grad_norm < 1e-14:
                     continue
 
-                cos_theta = np.dot(grad_c, n_vec) / grad_norm
-                angles.append(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+                # Normal pointing downwards
+                n_vec = np.array([0.0, -1.0])
+
+                cos_theta = np.dot(grad_xy, n_vec) / grad_norm
+
+                angles.append(
+                    np.arccos(np.clip(cos_theta, -1.0, 1.0))
+                )
 
             finally:
                 local_c.unbind()
@@ -642,14 +734,22 @@ def computeContactAngle(c_n, h, Cn, mesh):
     finally:
         pass
 
-    if not angles:
+    # Collect angles from every MPI rank
+    all_angles = MPI.COMM_WORLD.allgather(angles)
+    
+    # Combine local angle lists into one global list
+    global_angles = [
+        angle
+        for rank_angles in all_angles
+        for angle in rank_angles
+    ]
+    
+    if len(global_angles) == 0:
         raise ValueError(
-            "No valid interfacial points found near the substrate."
+            "No valid interfacial points found on any MPI rank."
         )
-
-    # Preserve the original exclusion of the left contact line.
-    # For that exclusion, store (midpoint, angle) pairs before averaging.
-    return np.degrees(np.mean(angles))
+    
+    return np.degrees(np.mean(global_angles))
 
     
 #%% Define BCs
@@ -944,14 +1044,14 @@ for n in range(numSteps):
     mass_diff.assign( mass_n - mass_init )
 
     
-    if n % 100 == 0:
+    if n % 50 == 0:
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=5)
+            maxLevel=7)
     
         dune.fem.gridAdapt(
             marker,
@@ -977,7 +1077,7 @@ for n in range(numSteps):
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 500 == 0:
+    if n % 100 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
@@ -986,21 +1086,34 @@ for n in range(numSteps):
         
         #print("mass_n type:", type(mass_n), "\n\n")
         
-        if n > 3000:
-            theta_avg = 1 #computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
+        xh = V.interpolate(x[0], name="x")
+        yh = V.interpolate(x[1], name="y")
+        zh = V.interpolate(x[2], name="z")
+        dof_coords = np.column_stack([xh.as_numpy, yh.as_numpy, zh.as_numpy])  
+
+        
+        z_mid = L_z / 2
+
+        if n >= 100:
+            left_cl, right_cl = trackCL(
+            phi_n,
+            dof_coords,
+            h_min,
+            z_mid=z_mid)
+            
+            if comm.rank == 0:
+                print("left_cl = ", left_cl, " right_cl = ", right_cl, flush=True)
+                
+                
+            theta_avg = computeContactAngle(phi_n, h_min, 
+                                            interfaceThickness, 
+                                            mesh, 
+                                            z_mid=z_mid, 
+                                            z_tol=h_min)   
             
             if comm.rank == 0:
                 print("theta = ", theta_avg, flush=True)
             
-            xh = V.interpolate(x[0], name="x")
-            yh = V.interpolate(x[1], name="y")
-            zh = V.interpolate(x[2], name="z")
-            dof_coords = np.column_stack([xh.as_numpy, yh.as_numpy, zh.as_numpy])  
-            left_cl, right_cl = 1,1 #trackCL(phi_n, dof_coords, h_min)
-            
-            if comm.rank == 0:
-                print("left_cl = ", left_cl, " right_cl = ", right_cl, flush=True)
-        
         vel_expr = getVel(f_n, forceDensity)
         vel3.interpolate(ufl.as_vector([vel_expr[0], vel_expr[1], vel_expr[2]]))
         
@@ -1015,6 +1128,8 @@ for n in range(numSteps):
             print("Max KE:", vel_mag.max()**2, flush=True)
             
         if n > 3000:
+            right_cl, left_cl = 1, 1
+            theta_avg = 1
             if comm.rank == 0:
                 log_file.write(f"{n:15d}"
                             f"{right_cl:15.3f}"

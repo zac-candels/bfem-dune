@@ -186,8 +186,8 @@ if mpi_comm.rank == 0:
         L_y=L_y,
         surface_amplitude=1.4,
         surface_freq=L_x / (8.0 * np.pi),
-        n_surface=40,
-        lc=0.3)
+        n_surface=10,
+        lc=1)
     gmsh.finalize()
 
 mpi_comm.Barrier()    
@@ -226,7 +226,7 @@ for element in mesh.elements:
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.01*h_min
+dt = 0.025*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.1*dt_c
 numSteps = int(Tfinal/dt)
@@ -904,7 +904,7 @@ for n in range(numSteps):
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=5)
+            maxLevel=7)
     
         dune.fem.gridAdapt(
             marker,
@@ -938,7 +938,7 @@ for n in range(numSteps):
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 50 == 0:
+    if n % 10 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
