@@ -249,8 +249,8 @@ if comm.rank == 0:
         L_x=L_x, L_y=L_y, L_z=L_z,
         surface_amplitude=1.0,
         surface_freq=L_x / (8.0 * np.pi),
-        n_surface=40,
-        lc=0.5)
+        n_surface=30,
+        lc=0.3)
     print("\nSTEP 2: Mesh generation completed", flush=True)
 
 MPI.COMM_WORLD.Barrier()
@@ -290,10 +290,11 @@ for element in mesh.elements:
 
     h_min = min(h_min, h_element)
 
+h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.125*h_min
+dt = 0.001*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
 numSteps = int(Tfinal/dt)
@@ -909,15 +910,6 @@ for n in range(numSteps):
     
         f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
     
-    # # Bottom wall: reflect populations into the fluid
-    # for idx in (2, 5, 6):
-    #     f_n_arrays[idx][bottomDoFs] = (
-    #         f_star_arrays[opp_idx[idx]][bottomDoFs])
-    
-    # # Top wall
-    # for idx in (4, 7, 8):
-    #     f_n_arrays[idx][topDoFs] = (
-    #         f_star_arrays[opp_idx[idx]][topDoFs])
         
     for idx in range(1, Q):
         dofs = bouncebackDofs[idx]
@@ -950,12 +942,9 @@ for n in range(numSteps):
     
     #print("mass_n = ", mass_n)
     mass_diff.assign( mass_n - mass_init )
-    
-    phi_a, mu_a = phi_n.as_numpy, mu_n.as_numpy
-    rho = sum(f_n_arrays)
 
     
-    if n % 10 == 0:
+    if n % 100 == 0:
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
@@ -981,22 +970,14 @@ for n in range(numSteps):
         f_n_arrays = [
             f_n[idx].as_numpy for idx in range(Q)]
     
-        # Recompute boundary DOF indices
-        bottomDoFs = np.where(
-            bottomFn.as_numpy != 0)[0]
-    
-        topDoFs = np.where(
-            topFn.as_numpy != 0)[0]
-    
         # Rebuild periodic matrix/factorizations
         P, mass_diag, mass_diag_periodic = build_solvers()
         
-        bottomDoFs, topDoFs = wall_dofs()
         
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 1 == 0:
+    if n % 500 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
@@ -1006,7 +987,7 @@ for n in range(numSteps):
         #print("mass_n type:", type(mass_n), "\n\n")
         
         if n > 3000:
-            theta_avg = computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
+            theta_avg = 1 #computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
             
             if comm.rank == 0:
                 print("theta = ", theta_avg, flush=True)
@@ -1015,7 +996,7 @@ for n in range(numSteps):
             yh = V.interpolate(x[1], name="y")
             zh = V.interpolate(x[2], name="z")
             dof_coords = np.column_stack([xh.as_numpy, yh.as_numpy, zh.as_numpy])  
-            left_cl, right_cl = trackCL(phi_n, dof_coords, h_min)
+            left_cl, right_cl = 1,1 #trackCL(phi_n, dof_coords, h_min)
             
             if comm.rank == 0:
                 print("left_cl = ", left_cl, " right_cl = ", right_cl, flush=True)
