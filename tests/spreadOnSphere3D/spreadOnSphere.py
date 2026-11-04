@@ -17,7 +17,7 @@ import scipy
 mpi_comm = MPI.COMM_WORLD
 
 # ---------------- Parameters ----------------
-R0 = 3
+R0 = 2.5
 L_x, L_y, L_z = 4*R0, 6*R0, 4*R0     # L_z is a choice: the 2D script had no z
 radius = R0                          # sphere radius
 xc, yc, zc = L_x/2, L_y/2 + 1.5*R0, L_z/2     # sphere centre
@@ -72,48 +72,83 @@ def create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
     gmsh.model.add("periodic_domain_with_sphere")
 
     occ = gmsh.model.occ
-    cx, cy, cz = L_x/2, L_y/2, L_z/2
+    cx, cy, cz = L_x/2, L_y/2 - 0.2*R0, L_z/2
 
-    box = occ.addBox(0, 0, 0, L_x, L_y, L_z)
+    y_min = 2.0
+    box = occ.addBox(0, y_min, 0, L_x, L_y - y_min, L_z)
     ball = occ.addSphere(cx, cy, cz, radius)
     cut, _ = occ.cut([(3, box)], [(3, ball)])
     occ.synchronize()
     volume = cut[0][1]
 
     # Classify boundary surfaces by bounding box
+    
+    # Classify boundary surfaces by bounding box
     tol = 1e-6
-    faces = {"left": None, "right": None, "bottom": None, "top": None,
-             "front": None, "back": None, "sphere": None}
+    
+    faces = {
+        "left": None,
+        "right": None,
+        "bottom": None,
+        "top": None,
+        "front": None,
+        "back": None,
+        "sphere": None
+    }
+    
     for dim, s in gmsh.model.getBoundary([(3, volume)], oriented=False):
         xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(2, s)
+    
         if abs(xmax - xmin) < tol:
-            faces["left" if xmin < tol else "right"] = s
+            if abs(xmin) < tol:
+                faces["left"] = s
+            elif abs(xmin - L_x) < tol:
+                faces["right"] = s
+    
         elif abs(ymax - ymin) < tol:
-            faces["bottom" if ymin < tol else "top"] = s
+            if abs(ymin - y_min) < tol:
+                faces["bottom"] = s
+            elif abs(ymin - L_y) < tol:
+                faces["top"] = s
+    
         elif abs(zmax - zmin) < tol:
-            faces["front" if zmin < tol else "back"] = s
+            if abs(zmin) < tol:
+                faces["front"] = s
+            elif abs(zmin - L_z) < tol:
+                faces["back"] = s
+    
         else:
             faces["sphere"] = s
-
+    
+    # Check that all surfaces were identified
+    for name, surface in faces.items():
+        if surface is None:
+            raise RuntimeError(f"Could not identify boundary surface: {name}")
+    
     # Exact periodicity (slave surface, master surface, master -> slave map)
     if periodic_x:
         gmsh.model.mesh.setPeriodic(
             2, [faces["right"]], [faces["left"]],
-            [1, 0, 0, L_x,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1])
+            [1, 0, 0, L_x, 0, 1, 0, 0,
+             0, 0, 1, 0, 0, 0, 0, 1]
+        )
+    
     if periodic_z:
         gmsh.model.mesh.setPeriodic(
             2, [faces["back"]], [faces["front"]],
-            [1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, L_z,  0, 0, 0, 1])
-
+            [1, 0, 0, 0, 0, 1, 0, 0,
+             0, 0, 1, L_z, 0, 0, 0, 1]
+        )
+    
     # Physical groups
     gmsh.model.addPhysicalGroup(3, [volume], tag=1)
     gmsh.model.addPhysicalGroup(2, [faces["bottom"]], tag=2)
-    gmsh.model.addPhysicalGroup(2, [faces["top"]],    tag=3)
-    gmsh.model.addPhysicalGroup(2, [faces["left"]],   tag=4)
-    gmsh.model.addPhysicalGroup(2, [faces["right"]],  tag=5)
+    gmsh.model.addPhysicalGroup(2, [faces["top"]], tag=3)
+    gmsh.model.addPhysicalGroup(2, [faces["left"]], tag=4)
+    gmsh.model.addPhysicalGroup(2, [faces["right"]], tag=5)
     gmsh.model.addPhysicalGroup(2, [faces["sphere"]], tag=6)
-    gmsh.model.addPhysicalGroup(2, [faces["front"]],  tag=7)
-    gmsh.model.addPhysicalGroup(2, [faces["back"]],   tag=8)
+    gmsh.model.addPhysicalGroup(2, [faces["front"]], tag=7)
+    gmsh.model.addPhysicalGroup(2, [faces["back"]], tag=8)
 
     # Refinement near the sphere
     field = gmsh.model.mesh.field
@@ -126,7 +161,7 @@ def create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
     field.setNumber(thr, "SizeMin", h_fine)
     field.setNumber(thr, "SizeMax", h_coarse)
     field.setNumber(thr, "DistMin", 0.5*radius)
-    field.setNumber(thr, "DistMax", 2.0*radius)
+    field.setNumber(thr, "DistMax", 1.2*radius)
     field.setAsBackgroundMesh(thr)
 
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
@@ -139,13 +174,14 @@ def create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
     return filename
 
 
+h_fine = 0.3
 mesh_file = "periodic_sphere.msh"
 if comm.rank == 0:
     print("\nSTEP 1: Starting mesh generation", flush=True)
     # The 2D sizes (0.025R / 0.05R) would give tens of millions of tets in 3D,
     # so these are coarser. Lower them as far as memory allows.
     create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
-                                h_fine=0.1*radius, h_coarse=0.4*radius,
+                                h_fine=h_fine, h_coarse=0.9*radius,
                                 periodic_x=True, periodic_z=True,
                                 filename=mesh_file)
     print("\nSTEP 2: Mesh generation completed", flush=True)
@@ -192,7 +228,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.01
+dt_mult_fac = 0.005
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -201,7 +237,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"3d_sphere_R{R0}_dt{dt_mult_fac:1g}")
+outDirName = os.path.join(WORKDIR, f"3d_sphere_R{R0}_dt{dt_mult_fac:1g}_new")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -620,8 +656,9 @@ velSquared = ufl.inner(velocity_n, velocity_n)
 if comm.rank == 0:
     print("about to start making AC forms \n\n", flush=True)
 
+lam = 0.01
 lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
-    - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
+    - dt*M_tilde*v*mu_n*ufl.dx - dt*lam*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
         - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
 # Wetting acts on the wall only: exclude the top, the x = 0, x = L_x
@@ -773,6 +810,25 @@ def build_solvers():
 P, mass_diag, mass_diag_periodic = build_solvers()
 
 bottomDoFs, topDoFs = wall_dofs()
+
+#%% Initial refinement before time-stepping
+
+def adapt_mesh():
+    global f_star_arrays, f_n_arrays, P, mass_diag, mass_diag_periodic, bouncebackDofs
+    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.6,
+                                 coarsenTolerance=0.2, minLevel=0, maxLevel=7)
+    dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
+                       + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
+    f_star_arrays = [f.as_numpy for f in f_star]
+    f_n_arrays    = [f.as_numpy for f in f_n]
+    P, mass_diag, mass_diag_periodic = build_solvers()
+    bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
+
+for _ in range(8):                       # before the time loop
+    phi_n.interpolate(phiInitExpr)       # re-sample exact profile on current mesh
+    adapt_mesh()
+phi_n.interpolate(phiInitExpr)
+mass_init = dune.fem.integrate((phi_n + 1)/2)
     
 
 #%% Time-stepping 
@@ -855,14 +911,14 @@ for n in range(numSteps):
     mass_diff.assign( mass_n - mass_init )
 
     
-    if n % 100 == 0:
+    if n % 20 == 0:
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=5)
+            maxLevel=7)
     
         dune.fem.gridAdapt(
             marker,
@@ -888,7 +944,7 @@ for n in range(numSteps):
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 500 == 0:
+    if n % 100 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
