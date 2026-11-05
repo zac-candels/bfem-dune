@@ -13,6 +13,7 @@ from dune.fem.view import adaptiveLeafGridView
 import ufl
 from collections import defaultdict
 import scipy
+import time 
 
 mpi_comm = MPI.COMM_WORLD
 
@@ -161,7 +162,7 @@ def create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
     field.setNumber(thr, "SizeMin", h_fine)
     field.setNumber(thr, "SizeMax", h_coarse)
     field.setNumber(thr, "DistMin", 0.5*radius)
-    field.setNumber(thr, "DistMax", 1.2*radius)
+    field.setNumber(thr, "DistMax", 1.1*radius)
     field.setAsBackgroundMesh(thr)
 
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
@@ -174,17 +175,70 @@ def create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
     return filename
 
 
-h_fine = 0.3
+h_fine = 0.5
+h_coarse = 1.5
 mesh_file = "periodic_sphere.msh"
+
+def save_solid_sphere_visualisation(msh_file, output_file="solid_sphere.vtu"):
+    """
+    Extract the spherical boundary (physical group 6) from the Gmsh mesh
+    and save it as a separate VTK unstructured grid.
+
+    The resulting surface can be visualised as an opaque solid in ParaView.
+    """
+    m = meshio.read(msh_file)
+
+    sphere_triangles = []
+
+    physical_data = m.cell_data.get("gmsh:physical", [])
+
+    for cell_block, physical_tags in zip(m.cells, physical_data):
+
+        if cell_block.type == "triangle":
+            mask = np.asarray(physical_tags) == 6
+
+            if np.any(mask):
+                sphere_triangles.append(cell_block.data[mask])
+
+    if not sphere_triangles:
+        raise RuntimeError(
+            "No spherical surface triangles found in physical group 6."
+        )
+
+    sphere_triangles = np.vstack(sphere_triangles)
+
+    sphere_mesh = meshio.Mesh(
+        points=m.points[:, :3],
+        cells=[("triangle", sphere_triangles)]
+    )
+
+    meshio.write(output_file, sphere_mesh)
+
+    print(
+        f"Saved solid sphere visualisation: {output_file}",
+        flush=True
+    )
+
 if comm.rank == 0:
+
     print("\nSTEP 1: Starting mesh generation", flush=True)
-    # The 2D sizes (0.025R / 0.05R) would give tens of millions of tets in 3D,
-    # so these are coarser. Lower them as far as memory allows.
-    create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
-                                h_fine=h_fine, h_coarse=0.9*radius,
-                                periodic_x=True, periodic_z=True,
-                                filename=mesh_file)
+
+    create_periodic_sphere_mesh(
+        L_x, L_y, L_z, radius,
+        h_fine=h_fine,
+        h_coarse=h_coarse*radius,
+        periodic_x=True,
+        periodic_z=True,
+        filename=mesh_file
+    )
+
     print("\nSTEP 2: Mesh generation completed", flush=True)
+
+    # Extract and save the solid sphere surface
+    save_solid_sphere_visualisation(
+        mesh_file,
+        output_file="solid_sphere.vtu"
+    )
 
 MPI.COMM_WORLD.Barrier()
 
@@ -237,7 +291,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"3d_sphere_R{R0}_dt{dt_mult_fac:1g}_new")
+outDirName = os.path.join(WORKDIR, f"hFine{h_fine}_hCoarse{h_coarse}_dt{dt_mult_fac:1g}_new")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -658,7 +712,7 @@ if comm.rank == 0:
 
 lam = 0.01
 lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
-    - dt*M_tilde*v*mu_n*ufl.dx - dt*lam*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
+    - dt*M_tilde*v*mu_n*ufl.dx -(beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
         - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
 # Wetting acts on the wall only: exclude the top, the x = 0, x = L_x
@@ -815,8 +869,8 @@ bottomDoFs, topDoFs = wall_dofs()
 
 def adapt_mesh():
     global f_star_arrays, f_n_arrays, P, mass_diag, mass_diag_periodic, bouncebackDofs
-    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.6,
-                                 coarsenTolerance=0.2, minLevel=0, maxLevel=7)
+    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.1,
+                                 coarsenTolerance=0, minLevel=0, maxLevel=7)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                        + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
@@ -836,7 +890,11 @@ mass_init = dune.fem.integrate((phi_n + 1)/2)
 if comm.rank == 0:
     print("about to start time-stepping\n\n")
     
+
 for n in range(numSteps):
+    
+    if n % 101 == 0:
+        start_time = time.time()
     
     #print("n = ", n)
 
@@ -911,11 +969,12 @@ for n in range(numSteps):
     mass_diff.assign( mass_n - mass_init )
 
     
-    if n % 20 == 0:
+    if n % 100 == 0:
+        
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.6,
+            refineTolerance=0.5,
             coarsenTolerance=0.2,
             minLevel=0,
             maxLevel=7)
@@ -945,6 +1004,11 @@ for n in range(numSteps):
         
     
     if n % 100 == 0:
+        
+        finish_time = time.time()
+        
+        if comm.rank == 0:
+            print("time per writing event: ", finish_time - start_time, flush=True)
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)

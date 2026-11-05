@@ -151,12 +151,12 @@ def create_periodic_circle_mesh(L_x, L_y, radius,
 
 mesh_file = "periodic_circle.msh"
 
-h_fine = 0.02
+h_fine = 0.2
 if comm.rank == 0:
     print("\nSTEP 1: Starting mesh generation", flush=True)
     # 2D allows much finer meshes than 3D.
     create_periodic_circle_mesh(L_x, L_y, radius,
-                                h_fine=h_fine*radius, h_coarse=0.5*radius,
+                                h_fine=h_fine*radius, h_coarse=1.5*radius,
                                 periodic_x=True,
                                 filename=mesh_file)
     print("\nSTEP 2: Mesh generation completed", flush=True)
@@ -827,7 +827,7 @@ for n in range(numSteps):
 
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
-    if n % 10 == 0:
+    if n % 100 == 0:
 
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
