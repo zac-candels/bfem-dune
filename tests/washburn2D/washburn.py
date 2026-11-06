@@ -60,8 +60,8 @@ rho_out = 1.0
 p_in = c_s**2 * rho_in
 p_out = c_s**2 * rho_out
 
-tau_1 = 1.0     # relaxation time in the phi = +1 phase (the drop, as phi_init = -tanh(x - xc))
-tau_2 = 0.0125    # relaxation time in the phi = -1 phase
+tau_1 = 1     # relaxation time in the phi = +1 phase (the drop, as phi_init = -tanh(x - xc))
+tau_2 = 0.9    # relaxation time in the phi = -1 phase
 
 domain = dune.grid.cartesianDomain(
     [0.0, 0.0],
@@ -88,7 +88,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.005
+dt_mult_fac = 0.001
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -97,7 +97,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"washburn_greater_viscosity_diff")
+outDirName = os.path.join(WORKDIR, f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -246,7 +246,7 @@ phi_n = V.interpolate(phiInitExpr, name="phi_n")
 mass_init = dune.fem.integrate((phi_n + 1) / 2)
 mass_diff = dune.ufl.Constant(1e-9)
 
-tau = tau_2 + (tau_1 - tau_2) * (1.0 + phi_n) / 2.0
+tau =(1 + phi_n)*tau_1/2 + (1 - phi_n)*tau_2/2
 
 forceDensity = -phi_n * ufl.grad(mu_n)
 
