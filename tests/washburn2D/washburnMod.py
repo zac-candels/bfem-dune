@@ -44,8 +44,8 @@ xi_values = [
 
 L_x = 16
 L_y = 2
-Nx = 35
-Ny = 8
+Nx = 38
+Ny = 12
 
 xc = 2
 
@@ -97,7 +97,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}")
+outDirName = os.path.join(WORKDIR, f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}_finer")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
