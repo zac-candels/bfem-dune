@@ -2,8 +2,6 @@ import os
 os.environ["DUNE_LOG_LEVEL"] = "ERROR"
 from mpi4py import MPI
 from scipy.sparse import linalg
-from math import sqrt
-import matplotlib.pyplot as plt
 import gmsh
 #import pygmsh
 #from dune.alugrid import aluConformGrid as GridView
@@ -14,10 +12,12 @@ import scipy
 import numpy as np
 import os
 import time
+import meshio
 from collections import defaultdict
 from dune.common import comm
 import ufl
-from mpi4py import MPI
+from dune.alugrid import aluConformGrid
+from dune.fem.view import adaptiveLeafGridView
 
 R0 = 2
 initDropDiam = 2*R0
@@ -180,36 +180,42 @@ mpi_comm = MPI.COMM_WORLD
 
 mesh_file = "sinusoidal_wall.msh"
 
-if mpi_comm.rank == 0: 
+if comm.rank == 0: 
     create_sinusoidal_mesh(
         L_x=L_x,
         L_y=L_y,
-        surface_amplitude=1.4,
+        surface_amplitude=0.0,
         surface_freq=L_x / (8.0 * np.pi),
-        n_surface=10,
-        lc=1)
+        n_surface=20,
+        lc=0.5)
     gmsh.finalize()
 
-mpi_comm.Barrier()    
+MPI.COMM_WORLD.Barrier() 
 
 print("\nSTEP 2: Mesh generation completed", flush=True)
 
+# ---------------- Build the dune grid ----------------
+if mpi_comm.rank == 0:
+    m = meshio.read(mesh_file)
+    points = m.points[:, :2]
+    tris = m.cells_dict["triangle"]
 
-# Import the Gmsh mesh and wrap it in an ALUGrid leaf view.
-from dune.grid import reader
-from dune.alugrid import aluConformGrid
-from dune.fem.view import adaptiveLeafGridView
-import meshio
+    # keep only vertices used by a triangle, and renumber
+    used, inverse = np.unique(tris, return_inverse=True)
+    vertices = points[used]
+    simplices = inverse.reshape(tris.shape).astype(np.int64)
+else:
+    vertices = np.zeros((0, 2))
+    simplices = np.zeros((0, 3), dtype=np.int64)
 
-m = meshio.read("sinusoidal_wall.msh")
-vertices = m.points[:, :2]
-simplices = m.cells_dict["triangle"]
+grid = aluConformGrid({"vertices": vertices, "simplices": simplices}, dimgrid=2)
+mesh = adaptiveLeafGridView(grid)
+mesh.hierarchicalGrid.loadBalance()
 
 grid = aluConformGrid({"vertices": vertices, "simplices": simplices}, dimgrid=2)
 print("ok", grid.size(0))
 mesh = adaptiveLeafGridView(grid)
 mesh.hierarchicalGrid.loadBalance()
-
 
 h_min = np.inf
 
@@ -223,12 +229,13 @@ for element in mesh.elements:
 
     h_min = min(h_min, h_element)
 
+h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.025*h_min
+dt = 0.01*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
-beta_mass_diff = 0.1*dt_c
+beta_mass_diff = 0.01*dt_c
 numSteps = int(Tfinal/dt)
 # Corresponding weights
 w = np.array([
@@ -301,8 +308,6 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
 
             # Keep the lower-facing boundary only.
             # The curved wall's outward normal has negative y component.
-            if abs(normal[1]) < 1e-8:
-                continue
 
             for point in np.asarray(
                 intersection.geometry.corners, dtype=float
@@ -802,6 +807,7 @@ def build_solvers():
 P, mass_diag, mass_diag_periodic = build_solvers()
 
 bottomDoFs, topDoFs = wall_dofs()
+
     
 
 #%% Time-stepping 
@@ -897,14 +903,14 @@ for n in range(numSteps):
     rho = sum(f_n_arrays)
 
     
-    if n % 10 == 0:
+    if n % 20 == 0:
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=7)
+            maxLevel=5)
     
         dune.fem.gridAdapt(
             marker,
@@ -938,7 +944,7 @@ for n in range(numSteps):
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 10 == 0:
+    if n % 1000 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)

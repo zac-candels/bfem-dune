@@ -61,7 +61,7 @@ p_in = c_s**2 * rho_in
 p_out = c_s**2 * rho_out
 
 tau_1 = 1     # relaxation time in the phi = +1 phase (the drop, as phi_init = -tanh(x - xc))
-tau_2 = 0.9    # relaxation time in the phi = -1 phase
+tau_2 = 0.05    # relaxation time in the phi = -1 phase
 
 domain = dune.grid.cartesianDomain(
     [0.0, 0.0],
@@ -88,7 +88,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.001
+dt_mult_fac = 0.01
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -202,6 +202,28 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
     bouncebackDofs = {
         idx: np.asarray(dofs, dtype=int)
         for idx, dofs in bouncebackDofs.items()}
+    
+    # ---- Corner nodes: bounce back ALL populations entering the domain ----
+    # sx, sy = inward direction along x and y at each corner
+    x_ref = x_dof
+    y_ref = y_dof
+    corner_dofs = {idx: [] for idx in range(1, Q)}
+    
+    for sx, x_c in ((1, 0.0), (-1, L_x)):
+        for sy, y_c in ((1, 0.0), (-1, L_y)):
+            cdofs = np.where((np.abs(x_ref - x_c) < tol) &
+                             (np.abs(y_ref - y_c) < tol))[0]
+            if len(cdofs) == 0:
+                continue
+            for idx in range(1, Q):
+                cx, cy = xi_values[idx]
+                if cx == sx or cy == sy:      # population enters the domain here
+                    corner_dofs[idx].extend(cdofs.tolist())
+    
+    for idx in range(1, Q):
+        bouncebackDofs[idx] = np.union1d(
+            bouncebackDofs[idx],
+            np.asarray(corner_dofs[idx], dtype=int)).astype(int)
 
     return bouncebackDofs
 
@@ -587,31 +609,28 @@ def apply_pressure_boundary_conditions():
     
 def build_pressure_boundary_dofs():
 
+    # Obtain the coordinates of the current DOFs.
+    # These arrays have the same local DOF ordering as V.as_numpy.
     x_dof = V.interpolate(
-        x[0], name="x_pressure_dof"
-    ).as_numpy.copy()
+        x[0], name="x_pressure_dof").as_numpy.copy()
 
-    y_dof = V.interpolate(
-        x[1], name="y_pressure_dof"
-    ).as_numpy.copy()
+    y_dof = V.interpolate(x[1], name="y_pressure_dof").as_numpy.copy()
 
-    tol = 1e-8
+    # Coordinate tolerance
+    tol = 1e-8 * max(1.0, L_x, L_y)
 
-    # Exclude the four wall corners. They belong to the
-    # horizontal-wall boundary treatment.
-    inlet = np.where(
-        (np.abs(x_dof) < tol) &
-        (y_dof > tol) &
-        (y_dof < L_y - tol)
-    )[0]
+    # Identify inlet and outlet DOFs, excluding the corners.
+    on_inlet = np.abs(x_dof) < tol
+    on_outlet = np.abs(x_dof - L_x) < tol
 
-    outlet = np.where(
-        (np.abs(x_dof - L_x) < tol) &
-        (y_dof > tol) &
-        (y_dof < L_y - tol)
-    )[0]
+    # Exclude the top and bottom wall DOFs.
+    away_from_walls = ( (y_dof > tol) & (y_dof < L_y - tol) )
 
-    return inlet, outlet
+    inletDofs = np.where(on_inlet & away_from_walls)[0]
+
+    outletDofs = np.where(on_outlet & away_from_walls)[0]
+
+    return inletDofs, outletDofs
 
 
 inletDofs, outletDofs = build_pressure_boundary_dofs()
@@ -699,12 +718,13 @@ bottomDoFs, topDoFs = wall_dofs()
 def adapt_mesh():
     global f_star_arrays, f_n_arrays, P, mass_diag, mass_diag_global, bouncebackDofs
     marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.6,
-                                 coarsenTolerance=0.2, minLevel=0, maxLevel=4)
+                                 coarsenTolerance=0.2, minLevel=0, maxLevel=3)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                        + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
     f_n_arrays    = [f.as_numpy for f in f_n]
     P, mass_diag, mass_diag_global = build_solvers()
+    inletDofs, outletDofs = build_pressure_boundary_dofs()
     bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
 for _ in range(8):                       # before the time loop
@@ -781,7 +801,7 @@ for n in range(numSteps):
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=4)
+            maxLevel=3)
 
         dune.fem.gridAdapt(
             marker,
