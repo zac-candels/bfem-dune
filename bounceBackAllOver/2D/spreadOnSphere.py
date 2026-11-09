@@ -174,7 +174,7 @@ if comm.rank == 0:
     # 2D allows much finer meshes than 3D.
     create_periodic_circle_mesh(L_x, L_y, radius,
                                 h_fine=h_fine*radius, h_coarse=1.5*radius,
-                                periodic_x=True,
+                                periodic_x=False,
                                 filename=mesh_file)
     print("\nSTEP 2: Mesh generation completed", flush=True)
 
@@ -288,11 +288,6 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
                 continue
 
             normal /= norm
-
-            # Skip the x = 0 and x = L_x boundaries (periodic): their
-            # normals have no y component.
-            if abs(normal[1]) < 1e-8:
-                continue
 
             for point in np.asarray(
                 intersection.geometry.corners, dtype=float

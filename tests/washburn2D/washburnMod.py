@@ -88,7 +88,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.01
+dt_mult_fac = 0.02
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -649,53 +649,6 @@ inletDofs, outletDofs = build_pressure_boundary_dofs()
 
 def build_solvers():
 
-    # 1. Local DOF coordinates
-    x_local = V.interpolate(x[0], name="x_dof").as_numpy.copy()
-    y_local = V.interpolate(x[1], name="y_dof").as_numpy.copy()
-
-    N_local = len(x_local)
-
-    # 2. Gather coordinates across MPI ranks
-    x_full = np.concatenate(
-        MPI.COMM_WORLD.allgather(x_local)
-    )
-    y_full = np.concatenate(
-        MPI.COMM_WORLD.allgather(y_local)
-    )
-
-    N_global = len(x_full)
-
-    # 3. Identify coincident DOFs shared between MPI ranks.
-    #    Do NOT identify x=0 with x=L_x.
-    keys = np.column_stack((
-        np.round(x_full, 10),
-        np.round(y_full, 10)
-    ))
-
-    unique_keys, inverse = np.unique(
-        keys, axis=0, return_inverse=True
-    )
-
-    nGlobal = len(unique_keys)
-
-    # 4. Global projection matrix
-    P_global = scipy.sparse.coo_matrix(
-        (
-            np.ones(N_global),
-            (np.arange(N_global), inverse)
-        ),
-        shape=(N_global, nGlobal)
-    ).tocsr()
-
-    # 5. Local rows of projection matrix
-    local_sizes = MPI.COMM_WORLD.allgather(N_local)
-
-    start_idx = sum(local_sizes[:comm.rank])
-    end_idx = start_idx + N_local
-
-    P_local = P_global[start_idx:end_idx, :]
-
-    # 6. Lumped mass matrix
     lumpOp = dune.fem.operator.galerkin(
         1.0 * v * ufl.dx - f_trial * v * ufl.dx
     )
@@ -705,30 +658,19 @@ def build_solvers():
 
     mass_diag_local = lumpVec.as_numpy.copy()
 
-    mass_diag_full = np.concatenate(
-        MPI.COMM_WORLD.allgather(mass_diag_local)
-    )
+    return mass_diag_local
 
-    mass_diag_global = np.asarray(
-        P_global.T @ mass_diag_full
-    ).ravel()
-
-    if np.any(mass_diag_global <= 0):
-        raise ValueError(
-            "Non-periodic lumped mass contains non-positive entries"
-        )
-
-    return P_local, mass_diag_local, mass_diag_global
+mass_diag_local = build_solvers()
 
 
-P, mass_diag, mass_diag_global = build_solvers()
+mass_diag_local = build_solvers()
 
 bottomDoFs, topDoFs = wall_dofs()
 
 #%% Refine mesh once before time-stepping commences
 
 def adapt_mesh():
-    global f_star_arrays, f_n_arrays, P, mass_diag, mass_diag_global
+    global f_star_arrays, f_n_arrays, mass_diag_local
     global bouncebackDofs, inletDofs, outletDofs
     marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.6,
                                  coarsenTolerance=0.2, minLevel=0, maxLevel=3)
@@ -736,7 +678,7 @@ def adapt_mesh():
                        + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
     f_n_arrays    = [f.as_numpy for f in f_n]
-    P, mass_diag, mass_diag_global = build_solvers()
+    mass_diag_local = build_solvers()
     inletDofs, outletDofs = build_pressure_boundary_dofs()
     bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
@@ -758,56 +700,54 @@ for n in range(numSteps):
     u_out = boundary_velocity(outletDofs)
 
     phi_form_op(zeroFn, rhs_AC_fn)
-    mu_form_op(zeroFn, rhs_Mu_fn)
 
     # Do collision
     for idx in range(Q):
         collisionOps[idx](zeroFn, rhsVecCollision[idx])
+        b_local = rhsVecCollision[idx].as_numpy
 
-        # Full DUNE RHS
-        b_full = rhsVecCollision[idx].as_numpy
-
-        # Reduce RHS to periodic space
-        b_periodic = comm.sum(P.T @ b_full)
-
-        # Solve periodic system
-        f_star_periodic = b_periodic / mass_diag_global
-
-        # Expand back to full DUNE space
-        f_star_arrays[idx][:] = P @ f_star_periodic + f_n_arrays[idx][:]
+        f_star_local = b_local / mass_diag_local
+        
+        f_star_arrays[idx][:] = f_star_local + f_n_arrays[idx][:]
 
     # Stream all populations
     for idx in range(Q):
         streamingOps[idx](zeroFn, rhsVecStreaming[idx])
+        b_local = rhsVecStreaming[idx].as_numpy
 
-        b_full = rhsVecStreaming[idx].as_numpy
-        b_periodic = comm.sum( P.T @ b_full )
-        f_n_periodic = b_periodic / mass_diag_global
-
-        f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
+        f_n_local = b_local / mass_diag_local
         
+        f_n_arrays[idx][:] = f_n_local + f_star_arrays[idx][:]
+    
     apply_pressure_boundary_conditions(u_in, u_out)
 
-    # Bounce-back
     for idx in range(1, Q):
         dofs = bouncebackDofs[idx]
         f_n_arrays[idx][dofs] = (
             f_star_arrays[opp_idx[idx]][dofs])
+            
 
     # Phase field and chemical potential
-    b_phi_full = rhs_AC_fn.as_numpy
-    b_phi_periodic = comm.sum( P.T @ b_phi_full )
-    phi_periodic = b_phi_periodic / mass_diag_global
-    phi_nP1.as_numpy[:] = ( P @ phi_periodic) + phi_n.as_numpy[:]
+    b_phi_local = rhs_AC_fn.as_numpy
 
-    b_mu_full = rhs_Mu_fn.as_numpy
-    b_mu_periodic = comm.sum( P.T @ b_mu_full )
-    mu_periodic = b_mu_periodic / mass_diag_global
-    mu_n.as_numpy[:] = (P @ mu_periodic)
-
+    phi_local = b_phi_local / mass_diag_local
+    
+    phi_nP1.as_numpy[:] = phi_local + phi_n.as_numpy[:]
+    
     phi_n.assign(phi_nP1)
 
+    b_mu_local = rhs_Mu_fn.as_numpy
+
+    mu_local = b_mu_local / mass_diag_local
+    
+    mu_n.as_numpy[:] = mu_local
+    
+    mu_form_op(zeroFn, rhs_Mu_fn)
+    
+    
     mass_n = dune.fem.integrate((phi_n + 1) / 2)
+    
+    #print("mass_n = ", mass_n)
     mass_diff.assign( mass_n - mass_init )
 
     if n % 200 == 0:
@@ -837,7 +777,7 @@ for n in range(numSteps):
             f_n[idx].as_numpy for idx in range(Q)]
 
         # Rebuild periodic matrix / lumped mass
-        P, mass_diag, mass_diag_global = build_solvers()
+        mass_diag_local = build_solvers()
         
         inletDofs, outletDofs = build_pressure_boundary_dofs()
 
