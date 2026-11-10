@@ -25,7 +25,7 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 70
+theta_deg = 20
 theta = theta_deg * np.pi / 180
 
 Q = 9
@@ -42,9 +42,9 @@ xi_values = [
     (1.0, -1.0),
 ]
 
-L_x = 32
+L_x = 16
 L_y = 2
-Nx = 60
+Nx = 30
 Ny = 20
 
 xc = 2
@@ -88,7 +88,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.005
+dt_mult_fac = 0.01
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -97,7 +97,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}_longerFiner")
+outDirName = os.path.join(WORKDIR, "testMeniscusTracking") #f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}_longerFiner")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -362,55 +362,52 @@ def evaluate_at(u, gridView, point):
 
 
 # Function to track contact line
-def trackCL(phi_n, dof_coordinates, h):
+def trackMeniscus(phi_n, dof_coordinates, L_y=L_y, tol=1e-8):
     """
-    Estimate the left and right contact-line positions (in x) from
-    nodal values of phi_n.
+    Locate the liquid front (phi = 0 crossing, liquid at phi = +1 on the left).
 
-    Parameters
-    ----------
-    phi_n : DUNE-FemPy discrete function
-        Order parameter.
-    dof_coordinates : array-like, shape (N, 2)
-        Coordinates corresponding to phi_n.as_numpy, in the same DOF order.
-    h : float
-        Mesh length scale used for filtering.
+    Returns
+    -------
+    x_apex : float
+        Meniscus position on the channel centreline y = L_y/2.
+    x_wall : float
+        Mean interface position along the two walls (contact-line position).
+    depth : float
+        x_wall - x_apex, how far the meniscus is curved back from the walls.
+
+    Uses only DOFs lying on a single horizontal node line for each of
+    y = 0, L_y/2, L_y, so it does not depend on the mesh size h and works
+    on the adapted mesh. The crossing is found by linear interpolation
+    between neighbouring nodes.
     """
     values = np.asarray(phi_n.as_numpy).reshape(-1)
     coords = np.asarray(dof_coordinates)
+    ys = coords[:, 1]
 
-    # Restrict to the lower part of the domain.
-    mask = coords[:, 1] < 4 * h
+    def front_on_line(y_target):
+        # Snap to the nearest existing node line (centreline may not be exact)
+        y_line = ys[np.argmin(np.abs(ys - y_target))]
+        sel = np.abs(ys - y_line) < tol
 
-    # Select approximate interface points.
-    mask &= (values > -0.2) & (values < 0.2)
+        xs = coords[sel, 0]
+        ph = values[sel]
+        order = np.argsort(xs)
+        xs, ph = xs[order], ph[order]
 
-    candidates = coords[mask]
-    candidate_values = values[mask]
+        # First + -> - crossing counting from the inlet side, so isolated
+        # islands of phi > 0 ahead of the front are ignored.
+        crossings = np.where((ph[:-1] > 0) & (ph[1:] <= 0))[0]
+        if len(crossings) == 0:
+            raise ValueError(f"No interface found on line y = {y_line:g}.")
 
-    if len(candidates) < 2:
-        raise ValueError(
-            "Not enough interface points to estimate the contact line."
-        )
+        i = crossings[0]
+        frac = ph[i] / (ph[i] - ph[i + 1])
+        return xs[i] + frac * (xs[i + 1] - xs[i])
 
-    # Exclude points near the opposite contact line.
-    min_x = candidates[:, 0].min()
-    keep_rightCL = candidates[:, 0] > min_x + 7 * h
+    x_apex = front_on_line(0.5 * L_y)
+    x_wall = 0.5 * (front_on_line(0.0) + front_on_line(L_y))
 
-    max_x = candidates[:, 0].max()
-    keep_leftCL = candidates[:, 0] < max_x - 7*h
-
-    candidates_rightCL = candidates[keep_rightCL]
-    candidates_leftCL = candidates[keep_leftCL]
-
-    # Leftmost and rightmost remaining points.
-    left_idx = np.argmin(candidates_leftCL[:, 0])
-    right_idx = np.argmax(candidates_rightCL[:, 0])
-
-    left_x = candidates_leftCL[left_idx, 0]
-    right_x = candidates_rightCL[right_idx, 0]
-
-    return left_x, right_x
+    return x_apex
 
 
 # Function to compute contact angle
@@ -798,10 +795,10 @@ for n in range(numSteps):
             xh = V.interpolate(x[0], name="x")
             yh = V.interpolate(x[1], name="y")
             dof_coords = np.column_stack([xh.as_numpy, yh.as_numpy])
-            left_cl, right_cl = 1, 1 #trackCL(phi_n, dof_coords, h_min)
+            meniscusPos = trackMeniscus(phi_n, dof_coords)
 
             if comm.rank == 0:
-                print("left_cl = ", left_cl, " right_cl = ", right_cl, flush=True)
+                print("meniscus position = ", meniscusPos, flush=True)
 
         vel_expr = getVel(f_n, forceDensity)
         vel3.interpolate(ufl.as_vector([vel_expr[0], vel_expr[1], 0.0]))

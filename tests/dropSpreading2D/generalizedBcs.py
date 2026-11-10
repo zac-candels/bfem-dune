@@ -25,7 +25,7 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 45
+theta_deg = 30
 theta = theta_deg * np.pi / 180
 
 Q = 9
@@ -49,7 +49,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"curved_bdy")
+outDirName = os.path.join(WORKDIR, f"unstructured_mesh_flat_surface")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -184,7 +184,7 @@ if comm.rank == 0:
     create_sinusoidal_mesh(
         L_x=L_x,
         L_y=L_y,
-        surface_amplitude=1,
+        surface_amplitude=0,
         surface_freq=L_x / (8.0 * np.pi),
         n_surface=20,
         lc=0.5)
@@ -765,6 +765,25 @@ def build_solvers():
 mass_diag_local = build_solvers()
 
 bottomDoFs, topDoFs = wall_dofs()
+
+#%% Refine mesh once before time-stepping commences
+
+def adapt_mesh():
+    global f_star_arrays, f_n_arrays, mass_diag_local, bouncebackDofs
+    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.6,
+                                  coarsenTolerance=0.2, minLevel=0, maxLevel=5)
+    dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
+                        + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
+    f_star_arrays = [f.as_numpy for f in f_star]
+    f_n_arrays    = [f.as_numpy for f in f_n]
+    mass_diag_local = build_solvers()
+    bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
+
+for _ in range(8):                       # before the time loop
+    phi_n.interpolate(phiInitExpr)       # re-sample exact profile on current mesh
+    adapt_mesh()
+phi_n.interpolate(phiInitExpr)
+mass_init = dune.fem.integrate((phi_n + 1)/2)
 
     
 
