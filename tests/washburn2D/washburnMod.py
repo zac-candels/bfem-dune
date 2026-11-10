@@ -42,10 +42,10 @@ xi_values = [
     (1.0, -1.0),
 ]
 
-L_x = 16
+L_x = 32
 L_y = 2
-Nx = 38
-Ny = 12
+Nx = 60
+Ny = 20
 
 xc = 2
 
@@ -61,7 +61,7 @@ p_in = c_s**2 * rho_in
 p_out = c_s**2 * rho_out
 
 tau_1 = 1     # relaxation time in the phi = +1 phase (the drop, as phi_init = -tanh(x - xc))
-tau_2 = 0.05    # relaxation time in the phi = -1 phase
+tau_2 = 0.02    # relaxation time in the phi = -1 phase
 
 domain = dune.grid.cartesianDomain(
     [0.0, 0.0],
@@ -88,7 +88,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.02
+dt_mult_fac = 0.005
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -97,7 +97,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}_finer")
+outDirName = os.path.join(WORKDIR, f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}_longerFiner")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -496,7 +496,8 @@ if comm.rank == 0:
     print("about to start making AC forms \n\n", flush=True)
 
 lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
-    - dt*M_tilde*v*mu_n*ufl.dx - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
+    - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
+    - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
 # Wetting acts on the wall only
 wall_ind = ufl.conditional(ufl.And(x[0] > 1e-6, x[0] < L_x - 1e-6), 1.0, 0.0)

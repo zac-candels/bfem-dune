@@ -138,6 +138,23 @@ def create_periodic_circle_mesh(L_x, L_y, radius,
     field.setNumber(thr, "DistMin", 0.5*radius)
     field.setNumber(thr, "DistMax", 1.2*radius)
     field.setAsBackgroundMesh(thr)
+    
+    # inside create_periodic_sphere_mesh, after the existing Threshold `thr`
+    f_drop = field.add("MathEval")
+    field.setString(f_drop, "F",
+        f"Abs(Sqrt((x-{xc})^2+(y-{yc})^2)-{R0})")
+    
+    h_interface = 0.3
+    thr_drop = field.add("Threshold")
+    field.setNumber(thr_drop, "InField", f_drop)
+    field.setNumber(thr_drop, "SizeMin", h_interface)   # ~0.5 for maxLevel=7
+    field.setNumber(thr_drop, "SizeMax", h_coarse)
+    field.setNumber(thr_drop, "DistMin", 1.0)           # band you want at full resolution
+    field.setNumber(thr_drop, "DistMax", 3.0)
+    
+    bg = field.add("Min")
+    field.setNumbers(bg, "FieldsList", [thr, thr_drop])
+    field.setAsBackgroundMesh(bg)                       # replace the setAsBackgroundMesh(thr)
 
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
@@ -157,7 +174,7 @@ if comm.rank == 0:
     # 2D allows much finer meshes than 3D.
     create_periodic_circle_mesh(L_x, L_y, radius,
                                 h_fine=h_fine*radius, h_coarse=1.5*radius,
-                                periodic_x=True,
+                                periodic_x=False,
                                 filename=mesh_file)
     print("\nSTEP 2: Mesh generation completed", flush=True)
 
@@ -197,7 +214,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.001
+dt_mult_fac = 0.01
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -206,7 +223,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"2dCircle_dt{dt_mult_fac:1g}_h{h_fine:1g}_changeBounceback")
+outDirName = os.path.join(WORKDIR, f"coarsened")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -271,11 +288,6 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
                 continue
 
             normal /= norm
-
-            # Skip the x = 0 and x = L_x boundaries (periodic): their
-            # normals have no y component.
-            if abs(normal[1]) < 1e-8:
-                continue
 
             for point in np.asarray(
                 intersection.geometry.corners, dtype=float
@@ -670,65 +682,33 @@ for idx in range(Q):
 
 
 def build_solvers():
-    # 1. Local DOF coordinates on this rank
-    x_local = V.interpolate(x[0], name="x_dof").as_numpy.copy()
-    y_local = V.interpolate(x[1], name="y_dof").as_numpy.copy()
-    N_local = len(x_local)
 
-    # 2. Gather coordinates from all ranks
-    x_full = np.concatenate(MPI.COMM_WORLD.allgather(x_local))
-    y_full = np.concatenate(MPI.COMM_WORLD.allgather(y_local))
-    N_global = len(x_full)
+    lumpOp = dune.fem.operator.galerkin(
+        1.0 * v * ufl.dx - f_trial * v * ufl.dx
+    )
 
-    # 3. Periodicity in x on the global coordinate set (y is NOT periodic)
-    x_periodic_global = x_full.copy()
-    x_periodic_global[np.abs(x_periodic_global - L_x) < 1e-10] = 0.0
-
-    keys = np.column_stack((np.round(x_periodic_global, 10),
-                            np.round(y_full, 10)))
-    unique_keys, inverse = np.unique(keys, axis=0, return_inverse=True)
-    nPeriodic = len(unique_keys)
-
-    # 4. Global projection matrix (N_global x nPeriodic)
-    P_global = scipy.sparse.coo_matrix(
-        (np.ones(N_global), (np.arange(N_global), inverse.ravel())),
-        shape=(N_global, nPeriodic)).tocsr()
-
-    # 5. Local slice of P for this rank
-    local_sizes = MPI.COMM_WORLD.allgather(N_local)
-    start_idx = sum(local_sizes[:comm.rank])
-    end_idx = start_idx + N_local
-    P_local = P_global[start_idx:end_idx, :]
-
-    # 6. Lumped mass (rank-local assembly, gathered and projected)
-    lumpOp = dune.fem.operator.galerkin(1.0 * v * ufl.dx - f_trial * v * ufl.dx)
     lumpVec = V.zero.copy()
     lumpOp(zeroFn, lumpVec)
 
     mass_diag_local = lumpVec.as_numpy.copy()
-    mass_diag_global = np.concatenate(MPI.COMM_WORLD.allgather(mass_diag_local))
-    mass_diag_periodic = np.asarray(P_global.T @ mass_diag_global).ravel()
 
-    if np.any(mass_diag_periodic <= 0):
-        raise ValueError("Periodic lumped mass contains non-positive entries")
+    return mass_diag_local
 
-    return P_local, mass_diag_local, mass_diag_periodic
-
-P, mass_diag, mass_diag_periodic = build_solvers()
+mass_diag_local = build_solvers()
 
 bottomDoFs, topDoFs = wall_dofs()
 
 #%% Refine mesh once before time-stepping commences
 
 def adapt_mesh():
-    global f_star_arrays, f_n_arrays, P, mass_diag, mass_diag_periodic, bouncebackDofs
-    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.6,
-                                 coarsenTolerance=0.2, minLevel=0, maxLevel=7)
+    global f_star_arrays, f_n_arrays, mass_diag_local, bouncebackDofs
+    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.1,
+                                  coarsenTolerance=0, minLevel=0, maxLevel=4)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
-                       + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
+                        + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
     f_n_arrays    = [f.as_numpy for f in f_n]
-    P, mass_diag, mass_diag_periodic = build_solvers()
+    mass_diag_local = build_solvers()
     bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
 for _ in range(8):                       # before the time loop
@@ -751,59 +731,60 @@ for n in range(numSteps):
     # Do collision
     for idx in range(Q):
         collisionOps[idx](zeroFn, rhsVecCollision[idx])
+        b_local = rhsVecCollision[idx].as_numpy
 
-        # Full DUNE RHS
-        b_full = rhsVecCollision[idx].as_numpy
-
-        # Reduce RHS to periodic space
-        b_periodic = comm.sum(P.T @ b_full)
-
-        # Solve periodic system
-        f_star_periodic = b_periodic / mass_diag_periodic
-
-        # Expand back to full DUNE space
-        f_star_arrays[idx][:] = P @ f_star_periodic + f_n_arrays[idx][:]
-
+        f_star_local = b_local / mass_diag_local
+        
+        f_star_arrays[idx][:] = f_star_local + f_n_arrays[idx][:]
+        
+    
+    #print("did collision \n\n")
+        
     # Stream all populations
     for idx in range(Q):
         streamingOps[idx](zeroFn, rhsVecStreaming[idx])
+        b_local = rhsVecStreaming[idx].as_numpy
 
-        b_full = rhsVecStreaming[idx].as_numpy
-        b_periodic = comm.sum( P.T @ b_full )
-        f_n_periodic = b_periodic / mass_diag_periodic
+        f_n_local = b_local / mass_diag_local
+        
+        f_n_arrays[idx][:] = f_n_local + f_star_arrays[idx][:]
+    
 
-        f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
-
-    # Bounce-back
     for idx in range(1, Q):
         dofs = bouncebackDofs[idx]
         f_n_arrays[idx][dofs] = (
             f_star_arrays[opp_idx[idx]][dofs])
+            
+            
+          
+    b_phi_local = rhs_AC_fn.as_numpy
 
-    # Phase field and chemical potential
-    b_phi_full = rhs_AC_fn.as_numpy
-    b_phi_periodic = comm.sum( P.T @ b_phi_full )
-    phi_periodic = b_phi_periodic / mass_diag_periodic
-    phi_nP1.as_numpy[:] = ( P @ phi_periodic) + phi_n.as_numpy[:]
-
-    b_mu_full = rhs_Mu_fn.as_numpy
-    b_mu_periodic = comm.sum( P.T @ b_mu_full )
-    mu_periodic = b_mu_periodic / mass_diag_periodic
-    mu_n.as_numpy[:] = (P @ mu_periodic)
-
+    phi_local = b_phi_local / mass_diag_local
+    
+    phi_nP1.as_numpy[:] = phi_local + phi_n.as_numpy[:]
+    
     phi_n.assign(phi_nP1)
 
+    b_mu_local = rhs_Mu_fn.as_numpy
+
+    mu_local = b_mu_local / mass_diag_local
+    
+    mu_n.as_numpy[:] = mu_local
+    
+    
     mass_n = dune.fem.integrate((phi_n + 1) / 2)
+    
+    #print("mass_n = ", mass_n)
     mass_diff.assign( mass_n - mass_init )
 
-    if n % 100 == 0:
+    if n % 200 == 0:
 
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
             refineTolerance=0.6,
             coarsenTolerance=0.2,
             minLevel=0,
-            maxLevel=7)
+            maxLevel=4)
 
         dune.fem.gridAdapt(
             marker,
@@ -823,11 +804,11 @@ for n in range(numSteps):
             f_n[idx].as_numpy for idx in range(Q)]
 
         # Rebuild periodic matrix / lumped mass
-        P, mass_diag, mass_diag_periodic = build_solvers()
+        mass_diag_local = build_solvers()
 
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
-    if n % 100 == 0:
+    if n % 1000 == 0:
 
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)

@@ -294,7 +294,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt = 0.005*h_min
+dt = 0.001*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
 numSteps = int(Tfinal/dt)
@@ -974,8 +974,8 @@ for n in range(numSteps):
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.6,
-            coarsenTolerance=0.2,
+            refineTolerance=0.4,
+            coarsenTolerance=0.1,
             minLevel=0,
             maxLevel=11)
     
@@ -1003,7 +1003,7 @@ for n in range(numSteps):
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
         
     
-    if n % 100 == 0:
+    if n % 1000 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
