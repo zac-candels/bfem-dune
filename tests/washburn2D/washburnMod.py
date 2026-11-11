@@ -361,52 +361,51 @@ def evaluate_at(u, gridView, point):
     raise ValueError(f"Point {point} is outside the grid")
 
 
-# Function to track contact line
 def trackMeniscus(phi_n, dof_coordinates, L_y=L_y, tol=1e-8):
     """
-    Locate the liquid front (phi = 0 crossing, liquid at phi = +1 on the left).
+    MPI-safe meniscus tracker. MUST be called on every rank, because it
+    contains collective operations.
 
-    Returns
-    -------
-    x_apex : float
-        Meniscus position on the channel centreline y = L_y/2.
-    x_wall : float
-        Mean interface position along the two walls (contact-line position).
-    depth : float
-        x_wall - x_apex, how far the meniscus is curved back from the walls.
-
-    Uses only DOFs lying on a single horizontal node line for each of
-    y = 0, L_y/2, L_y, so it does not depend on the mesh size h and works
-    on the adapted mesh. The crossing is found by linear interpolation
-    between neighbouring nodes.
+    Returns (x_apex, x_wall, depth), identical on all ranks:
+      x_apex : phi = 0 crossing on the centreline y = L_y/2
+      x_wall : mean phi = 0 crossing on the walls y = 0 and y = L_y
+      depth  : x_wall - x_apex
     """
+    mpi_comm = MPI.COMM_WORLD
+
     values = np.asarray(phi_n.as_numpy).reshape(-1)
     coords = np.asarray(dof_coordinates)
-    ys = coords[:, 1]
+    xs_all, ys_all = coords[:, 0], coords[:, 1]
 
     def front_on_line(y_target):
-        # Snap to the nearest existing node line (centreline may not be exact)
-        y_line = ys[np.argmin(np.abs(ys - y_target))]
-        sel = np.abs(ys - y_line) < tol
+        # Local nodes on this line, then collect them from every rank
+        sel = np.abs(ys_all - y_target) < tol
+        local = np.column_stack([xs_all[sel], values[sel]])
+        gathered = mpi_comm.allgather(local)
+        pts = np.concatenate(gathered, axis=0)
 
-        xs = coords[sel, 0]
-        ph = values[sel]
-        order = np.argsort(xs)
-        xs, ph = xs[order], ph[order]
+        # Sort by x and drop duplicates (shared/ghost DOFs appear on
+        # several ranks)
+        pts = pts[np.argsort(pts[:, 0])]
+        keep = np.concatenate([[True], np.diff(pts[:, 0]) > tol])
+        xs, ph = pts[keep, 0], pts[keep, 1]
 
-        # First + -> - crossing counting from the inlet side, so isolated
-        # islands of phi > 0 ahead of the front are ignored.
+        # First + -> - crossing from the inlet side
         crossings = np.where((ph[:-1] > 0) & (ph[1:] <= 0))[0]
         if len(crossings) == 0:
-            raise ValueError(f"No interface found on line y = {y_line:g}.")
-
+            return None
         i = crossings[0]
         frac = ph[i] / (ph[i] - ph[i + 1])
         return xs[i] + frac * (xs[i + 1] - xs[i])
 
     x_apex = front_on_line(0.5 * L_y)
-    x_wall = 0.5 * (front_on_line(0.0) + front_on_line(L_y))
+    x_bot = front_on_line(0.0)
+    x_top = front_on_line(L_y)
 
+    if x_apex is None or x_bot is None or x_top is None:
+        raise ValueError("No interface found on one of the tracking lines.")
+
+    x_wall = 0.5 * (x_bot + x_top)
     return x_apex
 
 
@@ -819,7 +818,7 @@ for n in range(numSteps):
         if n > 3000:
             if comm.rank == 0:
                 log_file.write(f"{n:15d}"
-                            f"{right_cl:15.3f}"
+                            f"{meniscusPos:15.3f}"
                             f"{vel_mag.max():15.8g}"
                             f"{theta_avg:15.2f}\n")
                 log_file.flush()
