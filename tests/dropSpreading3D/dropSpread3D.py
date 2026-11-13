@@ -974,8 +974,8 @@ for n in range(numSteps):
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.4,
-            coarsenTolerance=0.1,
+            refineTolerance=0.15,
+            coarsenTolerance=0.15,
             minLevel=0,
             maxLevel=11)
     

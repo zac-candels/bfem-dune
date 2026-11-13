@@ -125,36 +125,11 @@ def create_periodic_circle_mesh(L_x, L_y, radius,
     gmsh.model.addPhysicalGroup(1, faces["right"], tag=5)
     gmsh.model.addPhysicalGroup(1, faces["circle"], tag=6)
 
-    # Refinement near the circle
-    field = gmsh.model.mesh.field
-    dist = field.add("Distance")
-    field.setNumbers(dist, "CurvesList", faces["circle"])
-    field.setNumber(dist, "Sampling", 200)
-
-    thr = field.add("Threshold")
-    field.setNumber(thr, "InField", dist)
-    field.setNumber(thr, "SizeMin", h_fine)
-    field.setNumber(thr, "SizeMax", h_coarse)
-    field.setNumber(thr, "DistMin", 0.5*radius)
-    field.setNumber(thr, "DistMax", 1.2*radius)
-    field.setAsBackgroundMesh(thr)
-    
-    # inside create_periodic_sphere_mesh, after the existing Threshold `thr`
-    f_drop = field.add("MathEval")
-    field.setString(f_drop, "F",
-        f"Abs(Sqrt((x-{xc})^2+(y-{yc})^2)-{R0})")
-    
-    h_interface = 0.3
-    thr_drop = field.add("Threshold")
-    field.setNumber(thr_drop, "InField", f_drop)
-    field.setNumber(thr_drop, "SizeMin", h_interface)   # ~0.5 for maxLevel=7
-    field.setNumber(thr_drop, "SizeMax", h_coarse)
-    field.setNumber(thr_drop, "DistMin", 1.0)           # band you want at full resolution
-    field.setNumber(thr_drop, "DistMax", 3.0)
-    
-    bg = field.add("Min")
-    field.setNumbers(bg, "FieldsList", [thr, thr_drop])
-    field.setAsBackgroundMesh(bg)                       # replace the setAsBackgroundMesh(thr)
+    gmsh.option.setNumber("Mesh.MeshSizeMin", h_fine)
+    gmsh.option.setNumber("Mesh.MeshSizeMax", h_fine)
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
 
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
@@ -168,7 +143,7 @@ def create_periodic_circle_mesh(L_x, L_y, radius,
 
 mesh_file = "periodic_circle.msh"
 
-h_fine = 0.2
+h_fine = 0.25
 if comm.rank == 0:
     print("\nSTEP 1: Starting mesh generation", flush=True)
     # 2D allows much finer meshes than 3D.
@@ -223,7 +198,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"coarsened")
+outDirName = os.path.join(WORKDIR, f"spreadOnSphere_changeRemeshing")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -255,7 +230,7 @@ if comm.rank == 0:
 
 def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
     """
-    Build bounce-back DOF sets for the wall boundaries.
+    Build bounce-back DOF sets for the lower wall.
 
     DOF indices are taken from DUNE's Lagrange space, so they
     correspond to the ordering in f_n[idx].as_numpy.
@@ -266,7 +241,7 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
     y_dof = V.interpolate(x[1], name="y_dof_bb").as_numpy.copy()
 
     dof_by_key = {tuple(np.round(np.array([xx, yy]) / tol).astype(np.int64)): i
-                  for i, (xx, yy) in enumerate(zip(x_dof, y_dof))}
+        for i, (xx, yy) in enumerate(zip(x_dof, y_dof))}
 
     # Accumulate boundary normals at each DUNE DOF
     normals_sum = defaultdict(lambda: np.zeros(2))
@@ -277,7 +252,6 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
             if not intersection.boundary:
                 continue
 
-            # In 2D the intersection is a 1D reference element
             normal = np.asarray(
                 intersection.unitOuterNormal([0.5]),
                 dtype=float
@@ -313,11 +287,9 @@ def build_bounceback_dofs(mesh, V, xi_values, Q, tol=1e-8):
     # Build population-specific bounce-back index arrays
     bouncebackDofs = {idx: [] for idx in range(1, Q)}
 
-    ctol = 0.2
     for dof, normal in boundary_normals.items():
         for idx in range(1, Q):
-            c = np.asarray(xi_values[idx])
-            if np.dot(normal, c)/np.linalg.norm(c) < -ctol:
+            if np.dot(normal, xi_values[idx]) < 0:
                 bouncebackDofs[idx].append(dof)
 
     bouncebackDofs = {
@@ -702,8 +674,8 @@ bottomDoFs, topDoFs = wall_dofs()
 
 def adapt_mesh():
     global f_star_arrays, f_n_arrays, mass_diag_local, bouncebackDofs
-    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.1,
-                                  coarsenTolerance=0, minLevel=0, maxLevel=4)
+    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.15,
+                                  coarsenTolerance=0, minLevel=0, maxLevel=5)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                         + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
@@ -777,14 +749,14 @@ for n in range(numSteps):
     #print("mass_n = ", mass_n)
     mass_diff.assign( mass_n - mass_init )
 
-    if n % 200 == 0:
+    if n % 100 == 0:
 
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.6,
-            coarsenTolerance=0.2,
+            refineTolerance=0.15,
+            coarsenTolerance=0.15,
             minLevel=0,
-            maxLevel=4)
+            maxLevel=5)
 
         dune.fem.gridAdapt(
             marker,

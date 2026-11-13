@@ -31,9 +31,9 @@ theta = theta_deg * np.pi / 180
 
 Q = 9
 
-L_x = 48
+L_x = 36
 L_y = 4
-Nx = 120
+Nx = 90
 Ny = 10
 
 #%% Prepare output
@@ -81,7 +81,7 @@ for element in mesh.elements:
 
 h_min = h_min*(1/2**3)
 
-Tfinal = 1500
+Tfinal = 4500
 dt = 0.05*h_min 
 beta_mass_diff = 0.1*dt
 numSteps = int(Tfinal/dt)
@@ -641,7 +641,7 @@ for n in range(numSteps):
         bottomDoFs, topDoFs, leftDoFs, rightDoFs = wall_dofs()
         
     
-    if n % 2000 == 0:
+    if n % 100 == 0:
         
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
