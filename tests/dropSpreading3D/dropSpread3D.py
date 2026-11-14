@@ -59,10 +59,10 @@ xi_values = [
 
 L_x = 16
 L_y = 4
-L_z = 8
+L_z = 16
 Nx = 40
 Ny = 10
-Nz = 20
+Nz = 40
 
 #%% Prepare output
 WORKDIR = os.getcwd()

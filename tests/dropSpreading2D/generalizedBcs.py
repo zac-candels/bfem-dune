@@ -49,7 +49,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"unstructured_mesh_flat_surface")
+outDirName = os.path.join(WORKDIR, f"curvedBdyNeumannBounceback_moreRefined")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -184,7 +184,7 @@ if comm.rank == 0:
     create_sinusoidal_mesh(
         L_x=L_x,
         L_y=L_y,
-        surface_amplitude=0,
+        surface_amplitude=1,
         surface_freq=L_x / (8.0 * np.pi),
         n_surface=20,
         lc=0.5)
@@ -261,10 +261,11 @@ xi = [
 
 print("\nSTEP 8: Creating finite-element space", flush=True)
 
+
 V = dune.fem.space.lagrange(mesh, order=1)
 
 x = ufl.SpatialCoordinate(V)
-
+n_f = ufl.FacetNormal(V) 
 print("\nSTEP 9: Finite-element space created successfully", flush=True)
 
 #%% Compute boundary DOF normals
@@ -681,6 +682,12 @@ for idx in range(Q):
         + dt*v*body_Force(velStar_n, idx, forceDensity)*ufl.dx\
         + double_dot_product_term\
         + dot_product_force_term
+
+    if idx != 0:
+        xi_dot_n = ufl.inner(xi[idx], n_f)
+        inflow   = ufl.min_value(xi_dot_n, 0.0)        # nonzero only where xi.n < 0
+        f_bc     = f_star[opp_idx[idx]]                # bounced-back value
+        lin_form_idx += - dt * v * inflow * (f_bc - f_star[idx]) * ufl.ds
         
     f_eq_idx = f_equil(
         idx,
@@ -770,8 +777,8 @@ bottomDoFs, topDoFs = wall_dofs()
 
 def adapt_mesh():
     global f_star_arrays, f_n_arrays, mass_diag_local, bouncebackDofs
-    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.6,
-                                  coarsenTolerance=0.2, minLevel=0, maxLevel=5)
+    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.15,
+                                  coarsenTolerance=0.15, minLevel=0, maxLevel=5)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                         + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
@@ -824,12 +831,6 @@ for n in range(numSteps):
         
         f_n_arrays[idx][:] = f_n_local + f_star_arrays[idx][:]
     
-
-    for idx in range(1, Q):
-        dofs = bouncebackDofs[idx]
-        f_n_arrays[idx][dofs] = (
-            f_star_arrays[opp_idx[idx]][dofs])
-            
             
           
     b_phi_local = rhs_AC_fn.as_numpy
@@ -860,8 +861,8 @@ for n in range(numSteps):
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.6,
-            coarsenTolerance=0.2,
+            refineTolerance=0.15,
+            coarsenTolerance=0.15,
             minLevel=0,
             maxLevel=5)
     

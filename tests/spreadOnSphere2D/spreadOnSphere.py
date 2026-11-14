@@ -26,7 +26,7 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 30
+theta_deg = 120
 theta = theta_deg*np.pi/180
 
 # D2Q9 lattice (ordering chosen so that the opposite of odd idx is idx+1)
@@ -198,7 +198,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"spreadOnSphere_changeRemeshing")
+outDirName = os.path.join(WORKDIR, f"spreadOnSphere_CA{theta_deg}")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -222,6 +222,8 @@ if comm.rank == 0:
 V = dune.fem.space.lagrange(mesh, order=1)
 
 x = ufl.SpatialCoordinate(V)
+
+n_f = ufl.FacetNormal(V) 
 
 if comm.rank == 0:
     print("\nSTEP 9: Finite-element space created successfully", flush=True)
@@ -606,6 +608,13 @@ for idx in range(Q):
         + double_dot_product_term\
         + dot_product_force_term
 
+    if idx != 0:
+        xi_dot_n = ufl.inner(xi[idx], n_f)
+        inflow   = ufl.min_value(xi_dot_n, 0.0)        # nonzero only where xi.n < 0
+        f_bc     = f_star[opp_idx[idx]]                # bounced-back value
+        lin_form_idx += - dt * v * inflow * (f_bc - f_star[idx]) * ufl.ds
+        
+
     f_eq_idx = f_equil(
         idx,
         velocity_n,
@@ -721,13 +730,6 @@ for n in range(numSteps):
         
         f_n_arrays[idx][:] = f_n_local + f_star_arrays[idx][:]
     
-
-    for idx in range(1, Q):
-        dofs = bouncebackDofs[idx]
-        f_n_arrays[idx][dofs] = (
-            f_star_arrays[opp_idx[idx]][dofs])
-            
-            
           
     b_phi_local = rhs_AC_fn.as_numpy
 

@@ -22,12 +22,17 @@ import ufl
 
 R0 = 2
 initDropDiam = 2*R0
-A = 0.5
+A = 2
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
+surfTen = np.sqrt(8*kappa*A/9)
 M_tilde = 10
-theta_deg = 1.5
+theta_deg = 0.1
 theta = theta_deg * np.pi / 180
+rho_init = 1.0
+nu = 1/3
+c_s = np.sqrt(1/3)
+tau = 0.1
 
 Q = 9
 
@@ -38,7 +43,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"tannersLaw")
+outDirName = os.path.join(WORKDIR, f"theta_{theta_deg}_A{A}_tau{tau}")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -51,10 +56,7 @@ log_file.flush()
 
 xc, yc = L_x/2, R0 - 0.6*R0
 
-rho_init = 1.0
-nu = 1/3
-c_s = np.sqrt(1/3)
-tau = 0.1
+
 
 domain = dune.grid.cartesianDomain(
     [0.0, 0.0],
