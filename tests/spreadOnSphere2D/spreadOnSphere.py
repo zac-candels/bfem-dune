@@ -1,4 +1,5 @@
 import os
+import argparse
 os.environ["DUNE_LOG_LEVEL"] = "ERROR"
 import numpy as np
 import gmsh
@@ -26,7 +27,21 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 120
+
+parser = argparse.ArgumentParser(
+    description="2D droplet spreading simulation"
+)
+
+parser.add_argument(
+    "--theta_deg",
+    type=float,
+    default=120,
+    help="Equilibrium contact angle in degrees (default: 120)"
+)
+
+args = parser.parse_args()
+
+theta_deg = args.theta_deg
 theta = theta_deg*np.pi/180
 
 # D2Q9 lattice (ordering chosen so that the opposite of odd idx is idx+1)
@@ -143,7 +158,7 @@ def create_periodic_circle_mesh(L_x, L_y, radius,
 
 mesh_file = "periodic_circle.msh"
 
-h_fine = 0.25
+h_fine = 0.1
 if comm.rank == 0:
     print("\nSTEP 1: Starting mesh generation", flush=True)
     # 2D allows much finer meshes than 3D.
@@ -683,8 +698,8 @@ bottomDoFs, topDoFs = wall_dofs()
 
 def adapt_mesh():
     global f_star_arrays, f_n_arrays, mass_diag_local, bouncebackDofs
-    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.15,
-                                  coarsenTolerance=0, minLevel=0, maxLevel=5)
+    marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.1,
+                                  coarsenTolerance=0, minLevel=0, maxLevel=6)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                         + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
@@ -751,14 +766,14 @@ for n in range(numSteps):
     #print("mass_n = ", mass_n)
     mass_diff.assign( mass_n - mass_init )
 
-    if n % 100 == 0:
+    if n % 50 == 0:
 
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.15,
-            coarsenTolerance=0.15,
+            refineTolerance=0.1,
+            coarsenTolerance=0.1,
             minLevel=0,
-            maxLevel=5)
+            maxLevel=6)
 
         dune.fem.gridAdapt(
             marker,
@@ -782,7 +797,7 @@ for n in range(numSteps):
 
         bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
-    if n % 1000 == 0:
+    if n % 5000 == 0:
 
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)

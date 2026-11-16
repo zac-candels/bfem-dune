@@ -22,17 +22,19 @@ import ufl
 
 R0 = 2
 initDropDiam = 2*R0
-A = 2
+A = 0.1
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 surfTen = np.sqrt(8*kappa*A/9)
 M_tilde = 10
-theta_deg = 0.1
+theta_deg = 1.5
 theta = theta_deg * np.pi / 180
 rho_init = 1.0
 nu = 1/3
 c_s = np.sqrt(1/3)
-tau = 0.1
+tau_1 = 1     # relaxation time in the phi = +1 phase (the drop, as phi_init = -tanh(x - xc))
+tau_2 = 0.05    # relaxation time in the phi = -1 phase
+
 
 Q = 9
 
@@ -43,7 +45,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"theta_{theta_deg}_A{A}_tau{tau}")
+outDirName = os.path.join(WORKDIR, f"theta_{theta_deg}_A{A}_viscRatio{tau_1/tau_2:1g}")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -139,6 +141,8 @@ phiInitExpr = -ufl.tanh( (ufl.sqrt(pow(x[0]-xc,2) + pow(x[1]-yc,2)) - R0)\
 phi_n = V.interpolate(phiInitExpr, name="phi_n")
 mass_init = dune.fem.integrate((phi_n + 1) / 2)
 mass_diff = dune.ufl.Constant(1e-9)
+
+tau =(1 + phi_n)*tau_1/2 + (1 - phi_n)*tau_2/2
 
 forceDensity = -phi_n * ufl.grad(mu_n)
 

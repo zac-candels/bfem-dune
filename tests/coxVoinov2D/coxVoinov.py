@@ -62,7 +62,7 @@ Ca = mu_visc*U/sigma
 #%% Prepare output
 WORKDIR = os.getcwd()
 outDirName = os.path.join(
-    WORKDIR, f"bridge_theta{theta_deg:1g}_U{U:g}_A{A}_tau{tau}")
+    WORKDIR, "test")#f"bridge_theta{theta_deg:1g}_U{U:g}_A{A}_tau{tau}")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -181,6 +181,7 @@ else:
     d_signed = W_bridge - X
 
 phiInitExpr = ufl.tanh(d_signed / (ufl.sqrt(2)*interfaceThickness))
+phiInitExpr = 1
 
 phi_n = V.interpolate(phiInitExpr, name="phi_n")
 mass_init = dune.fem.integrate((phi_n + 1) / 2)
