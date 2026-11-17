@@ -46,13 +46,13 @@ theta = theta_deg*np.pi/180
 
 # D2Q9 lattice (ordering chosen so that the opposite of odd idx is idx+1)
 Q = 9
-xi_values = [
+xi_values = np.asarray([
     (0.0,  0.0),
     (1.0,  0.0), (-1.0,  0.0),
     (0.0,  1.0), (0.0, -1.0),
     (1.0,  1.0), (-1.0, -1.0),
     (1.0, -1.0), (-1.0,  1.0),
-]
+])
 
 rho_init = 1.0
 nu = 1/3
@@ -204,7 +204,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.01
+dt_mult_fac = 0.2
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -235,6 +235,7 @@ if comm.rank == 0:
     print("\nSTEP 8: Creating finite-element space", flush=True)
 
 V = dune.fem.space.lagrange(mesh, order=1)
+V_vec = dune.fem.space.lagrange(mesh, order=1, dimRange=2)
 
 x = ufl.SpatialCoordinate(V)
 
@@ -338,6 +339,9 @@ f_n = []
 f_star = []
 f_nP1 = []
 
+lumpOp = dune.fem.operator.galerkin(
+        1.0 * v * ufl.dx - f_trial * v * ufl.dx)
+
 initFn = V.interpolate(0, "initFn")
 for idx in range(Q):
     f_star.append( initFn.copy(name=f"f_star{idx}") )
@@ -355,7 +359,7 @@ phi_n = V.interpolate(phiInitExpr, name="phi_n")
 mass_init = dune.fem.integrate((phi_n + 1) / 2)
 mass_diff = dune.ufl.Constant(1e-9)
 
-forceDensity = -phi_n * ufl.grad(mu_n)
+forceDensity = mu_n * ufl.grad(phi_n)
 
 t = dune.ufl.Constant(0.0)
 
@@ -371,10 +375,22 @@ def getVel(f_n, forceDensity):
     momentum = f_n[0] * xi[0]
     for idx in range(1, Q):
         momentum += f_n[idx] * xi[idx]
-    velTerm1 = momentum/density
+    velTerm1 = momentum/density 
     velTerm2 = forceDensity * dt / (2 * density)
     return velTerm1 + velTerm2
 
+def build_inv_mass():
+    lumpVec = V.zero.copy()
+    lumpOp(zeroFn, lumpVec)             # lumpOp created ONCE, outside this function
+    return 1.0 / lumpVec.as_numpy
+
+def getMomDensity(f_n):
+    momentumDens = np.zeros((f_n[0].size, 2))
+    for i in range(1, Q):
+        momentumDens[:, 0] += xi_values[i, 0]*f_n[i]
+        momentumDens[:, 1] += xi_values[i, 1]*f_n[i]
+        
+    return momentumDens
 
 def fEquilInit(vel_idx):
 
@@ -572,10 +588,19 @@ bilin_form_mu = mu_trial * v * ufl.dx
 if comm.rank == 0:
     print("going to create ufl functions for density, vel, velStar \n\n", flush=True)
 
-density = getDens(f_n)
-velocity_n = getVel(f_n, forceDensity)
-velStar_n = getVel(f_star, forceDensity)
+rho_n = initFn.copy(name="rho_n")
+velocity_n = V_vec.interpolate((0.0, 0.0), name="velocity_n")
+velStar_n = V_vec.interpolate((0.0, 0.0), name="velocity_n")
+F_h = V_vec.interpolate((0.0, 0.0), name="F_h")
 velSquared = ufl.inner(velocity_n, velocity_n)
+
+# Lumped L2 projection of the force mu*grad(phi)
+v2 = ufl.TestFunction(V_vec)
+f2 = ufl.TrialFunction(V_vec)
+F_op = dune.fem.operator.galerkin(
+    ufl.inner(mu_n*ufl.grad(phi_n), v2)*ufl.dx - ufl.inner(f2, v2)*ufl.dx)
+rhsF  = V_vec.zero.copy()
+zeroF = V_vec.zero.copy()
 
 if comm.rank == 0:
     print("about to start making AC forms \n\n", flush=True)
@@ -633,7 +658,7 @@ for idx in range(Q):
     f_eq_idx = f_equil(
         idx,
         velocity_n,
-        density,
+        rho_n,
         velSquared)
 
     lin_form_coll = ( - dt/(tau) * (f_n[idx] - f_eq_idx) )*v*ufl.dx
@@ -679,10 +704,6 @@ for idx in range(Q):
 
 def build_solvers():
 
-    lumpOp = dune.fem.operator.galerkin(
-        1.0 * v * ufl.dx - f_trial * v * ufl.dx
-    )
-
     lumpVec = V.zero.copy()
     lumpOp(zeroFn, lumpVec)
 
@@ -699,7 +720,7 @@ bottomDoFs, topDoFs = wall_dofs()
 def adapt_mesh():
     global f_star_arrays, f_n_arrays, mass_diag_local, bouncebackDofs
     marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.1,
-                                  coarsenTolerance=0, minLevel=0, maxLevel=6)
+                                  coarsenTolerance=0, minLevel=0, maxLevel=3)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                         + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
@@ -723,6 +744,18 @@ for n in range(numSteps):
 
     phi_form_op(zeroFn, rhs_AC_fn)
     mu_form_op(zeroFn, rhs_Mu_fn)
+    
+    inv_mass = build_inv_mass()
+    # --- force (depends only on mu_n, phi_n, unchanged until end of step)
+    F_op(zeroF, rhsF)
+    Fv = F_h.as_numpy.reshape(-1, 2)
+    Fv[:] = rhsF.as_numpy.reshape(-1, 2) * inv_mass[:, None]
+    
+    # --- density and velocity from f_n (once)
+    rho = np.sum(f_n_arrays, axis=0)
+    rho_n.as_numpy[:] = rho
+    u = (getMomDensity(f_n_arrays) + 0.5*dt*Fv) / rho[:, None]
+    velocity_n.as_numpy.reshape(-1, 2)[:] = u
 
     # Do collision
     for idx in range(Q):
@@ -770,10 +803,10 @@ for n in range(numSteps):
 
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.1,
+            refineTolerance=0.15,
             coarsenTolerance=0.1,
             minLevel=0,
-            maxLevel=6)
+            maxLevel=3)
 
         dune.fem.gridAdapt(
             marker,
@@ -795,9 +828,8 @@ for n in range(numSteps):
         # Rebuild periodic matrix / lumped mass
         mass_diag_local = build_solvers()
 
-        bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
-    if n % 5000 == 0:
+    if n % 1000 == 0:
 
         if comm.rank == 0:
             print("n = ", n, "writing to file", flush=True)
