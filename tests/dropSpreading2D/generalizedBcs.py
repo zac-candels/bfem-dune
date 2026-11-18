@@ -822,7 +822,7 @@ for _ in range(8):                       # before the time loop
 phi_n.interpolate(phiInitExpr)
 mass_init = dune.fem.integrate((phi_n + 1)/2)
 
-    
+inv_mass = build_inv_mass()
 
 #%% Time-stepping 
 
@@ -839,7 +839,6 @@ for n in range(numSteps):
     
     #print("assembled rhs vecs for phi, mu \n\n")
     
-    inv_mass = build_inv_mass()
     # --- force (depends only on mu_n, phi_n, unchanged until end of step)
     F_op(zeroF, rhsF)
     Fv = F_h.as_numpy.reshape(-1, 2)
@@ -935,6 +934,8 @@ for n in range(numSteps):
     
         # Rebuild periodic matrix/factorizations
         mass_diag_local = build_solvers()
+        
+        inv_mass = build_inv_mass()
         
     
     if n % 1000 == 0:

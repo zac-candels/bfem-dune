@@ -204,7 +204,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.2
+dt_mult_fac = 0.1
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -734,6 +734,7 @@ for _ in range(8):                       # before the time loop
 phi_n.interpolate(phiInitExpr)
 mass_init = dune.fem.integrate((phi_n + 1)/2)
 
+inv_mass = build_inv_mass()
 
 #%% Time-stepping
 
@@ -745,7 +746,7 @@ for n in range(numSteps):
     phi_form_op(zeroFn, rhs_AC_fn)
     mu_form_op(zeroFn, rhs_Mu_fn)
     
-    inv_mass = build_inv_mass()
+    
     # --- force (depends only on mu_n, phi_n, unchanged until end of step)
     F_op(zeroF, rhsF)
     Fv = F_h.as_numpy.reshape(-1, 2)
@@ -827,6 +828,8 @@ for n in range(numSteps):
 
         # Rebuild periodic matrix / lumped mass
         mass_diag_local = build_solvers()
+        
+        inv_mass = build_inv_mass()
 
 
     if n % 1000 == 0:

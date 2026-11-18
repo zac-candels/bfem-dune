@@ -32,7 +32,7 @@ theta = theta_deg*np.pi/180
 
 # D3Q19 lattice
 Q = 19
-xi_values = [
+xi_values = np.asarray([
     (0.0,  0.0,  0.0),
     (1.0,  0.0,  0.0), (-1.0, 0.0,  0.0),
     (0.0,  1.0,  0.0), (0.0, -1.0,  0.0),
@@ -43,7 +43,7 @@ xi_values = [
     (1.0,  0.0, -1.0), (-1.0, 0.0,  1.0),
     (0.0,  1.0,  1.0), (0.0, -1.0, -1.0),
     (0.0,  1.0, -1.0), (0.0, -1.0,  1.0),
-]
+])
 
 rho_init = 1.0
 nu = 1/3
@@ -175,7 +175,7 @@ def create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
     return filename
 
 
-h_fine = 0.5
+h_fine = 0.2
 h_coarse = 1.5
 mesh_file = "periodic_sphere.msh"
 
@@ -282,7 +282,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.005
+dt_mult_fac = 0.1
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -313,8 +313,11 @@ if comm.rank == 0:
     print("\nSTEP 8: Creating finite-element space", flush=True)
 
 V = dune.fem.space.lagrange(mesh, order=1)
+V_vec = dune.fem.space.lagrange(mesh, order=1, dimRange=3)
 
 x = ufl.SpatialCoordinate(V)
+
+n_f = ufl.FacetNormal(V) 
 
 if comm.rank == 0:
     print("\nSTEP 9: Finite-element space created successfully", flush=True)
@@ -420,6 +423,10 @@ f_n = []
 f_star = []
 f_nP1 = []
 
+lumpOp = dune.fem.operator.galerkin(
+        1.0 * v * ufl.dx - f_trial * v * ufl.dx)
+
+
 initFn = V.interpolate(0, "initFn")
 for idx in range(Q):
     #f_n.append( V.interpolate(0, "f_n{}".format(idx) ) )
@@ -459,6 +466,18 @@ def getVel(f_n, forceDensity):
     return velTerm1 + velTerm2
 
 
+def build_inv_mass():
+    lumpVec = V.zero.copy()
+    lumpOp(zeroFn, lumpVec)             # lumpOp created ONCE, outside this function
+    return 1.0 / lumpVec.as_numpy
+
+def getMomDensity(f_n):
+    momentumDens = np.zeros((f_n[0].size, 3))
+    for i in range(1, Q):
+        momentumDens[:, 0] += xi_values[i, 0]*f_n[i]
+        momentumDens[:, 1] += xi_values[i, 1]*f_n[i]
+        
+    return momentumDens
 
 def fEquilInit(vel_idx):
     
@@ -702,17 +721,25 @@ bilin_form_mu = mu_trial * v * ufl.dx
 if comm.rank == 0:
     print("going to create ufl functions for density, vel, velStar \n\n", flush=True)
 
-density = getDens(f_n)
-velocity_n = getVel(f_n, forceDensity)
-velStar_n = getVel(f_star, forceDensity)
+rho_n = initFn.copy(name="rho_n")
+velocity_n = V_vec.interpolate((0.0, 0.0, 0.0), name="velocity_n")
+velStar_n = V_vec.interpolate((0.0, 0.0, 0.0), name="velocity_n")
+F_h = V_vec.interpolate((0.0, 0.0, 0.0), name="F_h")
 velSquared = ufl.inner(velocity_n, velocity_n)
+
+# Lumped L2 projection of the force mu*grad(phi)
+v2 = ufl.TestFunction(V_vec)
+f2 = ufl.TrialFunction(V_vec)
+F_op = dune.fem.operator.galerkin(
+    ufl.inner(mu_n*ufl.grad(phi_n), v2)*ufl.dx - ufl.inner(f2, v2)*ufl.dx)
+rhsF  = V_vec.zero.copy()
+zeroF = V_vec.zero.copy()
 
 if comm.rank == 0:
     print("about to start making AC forms \n\n", flush=True)
 
-lam = 0.01
 lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
-    - dt*M_tilde*v*mu_n*ufl.dx -(beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
+    - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
         - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
 # Wetting acts on the wall only: exclude the top, the x = 0, x = L_x
@@ -756,11 +783,18 @@ for idx in range(Q):
         + dt*v*body_Force(velStar_n, idx, forceDensity)*ufl.dx\
         + double_dot_product_term\
         + dot_product_force_term
+
+    if idx != 0:
+        xi_dot_n = ufl.inner(xi[idx], n_f)
+        inflow   = ufl.min_value(xi_dot_n, 0.0)        # nonzero only where xi.n < 0
+        f_bc     = f_star[opp_idx[idx]]                # bounced-back value
+        lin_form_idx += - dt * v * inflow * (f_bc - f_star[idx]) * ufl.ds
+        
         
     f_eq_idx = f_equil(
         idx,
         velocity_n,
-        density,
+        rho_n,
         velSquared)
         
     lin_form_coll = ( - dt/(tau) * (f_n[idx] - f_eq_idx) )*v*ufl.dx
@@ -810,73 +844,29 @@ for idx in range(Q):
  
     
 def build_solvers():
-    # 1. Local DOF coordinates on this rank
-    x_local = V.interpolate(x[0], name="x_dof").as_numpy.copy()
-    y_local = V.interpolate(x[1], name="y_dof").as_numpy.copy()
-    z_local = V.interpolate(x[2], name="z_dof").as_numpy.copy()
-    N_local = len(x_local)
 
-    # 2. Gather coordinates from all ranks
-    x_full = np.concatenate(MPI.COMM_WORLD.allgather(x_local))
-    y_full = np.concatenate(MPI.COMM_WORLD.allgather(y_local))
-    z_full = np.concatenate(MPI.COMM_WORLD.allgather(z_local))
-    N_global = len(x_full)
-
-    # 3. Periodicity in x and z on the global coordinate set (y is NOT periodic)
-    x_periodic_global = x_full.copy()
-    x_periodic_global[np.abs(x_periodic_global - L_x) < 1e-10] = 0.0
-
-    z_periodic_global = z_full.copy()
-    z_periodic_global[np.abs(z_periodic_global - L_z) < 1e-10] = 0.0
-
-    keys = np.column_stack((np.round(x_periodic_global, 10),
-                            np.round(y_full, 10),
-                            np.round(z_periodic_global, 10)))
-    unique_keys, inverse = np.unique(keys, axis=0, return_inverse=True)
-    nPeriodic = len(unique_keys)
-
-    # 4. Global projection matrix (N_global x nPeriodic)
-    P_global = scipy.sparse.coo_matrix(
-        (np.ones(N_global), (np.arange(N_global), inverse.ravel())),
-        shape=(N_global, nPeriodic)).tocsr()
-
-    # 5. Local slice of P for this rank
-    local_sizes = MPI.COMM_WORLD.allgather(N_local)
-    start_idx = sum(local_sizes[:comm.rank])
-    end_idx = start_idx + N_local
-    P_local = P_global[start_idx:end_idx, :]
-
-    # 6. Lumped mass: use the same lumpOp as in 2D, not the row sums of the
-    #    assembled consistent matrix (that matrix is rank-local in parallel)
-    lumpOp = dune.fem.operator.galerkin(1.0 * v * ufl.dx - f_trial * v * ufl.dx)
     lumpVec = V.zero.copy()
     lumpOp(zeroFn, lumpVec)
 
     mass_diag_local = lumpVec.as_numpy.copy()
-    mass_diag_global = np.concatenate(MPI.COMM_WORLD.allgather(mass_diag_local))
-    mass_diag_periodic = np.asarray(P_global.T @ mass_diag_global).ravel()
 
-    if np.any(mass_diag_periodic <= 0):
-        raise ValueError("Periodic lumped mass contains non-positive entries")
+    return mass_diag_local
 
-    return P_local, mass_diag_local, mass_diag_periodic
-
-P, mass_diag, mass_diag_periodic = build_solvers()
+mass_diag_local = build_solvers()
 
 bottomDoFs, topDoFs = wall_dofs()
 
 #%% Initial refinement before time-stepping
 
 def adapt_mesh():
-    global f_star_arrays, f_n_arrays, P, mass_diag, mass_diag_periodic, bouncebackDofs
+    global f_star_arrays, f_n_arrays, mass_diag_local, inv_mass
     marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.1,
-                                 coarsenTolerance=0, minLevel=0, maxLevel=7)
+                                 coarsenTolerance=0, minLevel=0, maxLevel=9)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                        + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
     f_n_arrays    = [f.as_numpy for f in f_n]
-    P, mass_diag, mass_diag_periodic = build_solvers()
-    bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
+    mass_diag_local = build_solvers()
 
 for _ in range(8):                       # before the time loop
     phi_n.interpolate(phiInitExpr)       # re-sample exact profile on current mesh
@@ -884,7 +874,7 @@ for _ in range(8):                       # before the time loop
 phi_n.interpolate(phiInitExpr)
 mass_init = dune.fem.integrate((phi_n + 1)/2)
     
-
+inv_mass = build_inv_mass()
 #%% Time-stepping 
 
 if comm.rank == 0:
@@ -901,66 +891,52 @@ for n in range(numSteps):
     phi_form_op(zeroFn, rhs_AC_fn)
     mu_form_op(zeroFn, rhs_Mu_fn)
     
-    #print("assembled rhs vecs for phi, mu \n\n")
-
+    # --- force (depends only on mu_n, phi_n, unchanged until end of step)
+    F_op(zeroF, rhsF)
+    Fv = F_h.as_numpy.reshape(-1, 3)
+    Fv[:] = rhsF.as_numpy.reshape(-1, 3) * inv_mass[:, None]
     
+    # --- density and velocity from f_n (once)
+    rho = np.sum(f_n_arrays, axis=0)
+    rho_n.as_numpy[:] = rho
+    u = (getMomDensity(f_n_arrays) + 0.5*dt*Fv) / rho[:, None]
+    velocity_n.as_numpy.reshape(-1, 3)[:] = u
+
     # Do collision
     for idx in range(Q):
-        #print("idx = ", idx)
         collisionOps[idx](zeroFn, rhsVecCollision[idx])
-    
-        # Full DUNE RHS
-        b_full = rhsVecCollision[idx].as_numpy
-    
-        # Reduce RHS to periodic space
-        b_periodic = comm.sum(P.T @ b_full)
-    
-        # Solve periodic system
-        f_star_periodic = b_periodic / mass_diag_periodic
-    
-        # Expand back to full DUNE space
-        f_star_arrays[idx][:] = P @ f_star_periodic + f_n_arrays[idx][:]
-        
+        b_local = rhsVecCollision[idx].as_numpy
 
+        f_star_local = b_local / mass_diag_local
+        
+        f_star_arrays[idx][:] = f_star_local + f_n_arrays[idx][:]
+        
     
     #print("did collision \n\n")
         
     # Stream all populations
     for idx in range(Q):
         streamingOps[idx](zeroFn, rhsVecStreaming[idx])
-    
-        b_full = rhsVecStreaming[idx].as_numpy
-        b_periodic = comm.sum( P.T @ b_full )
-        f_n_periodic = b_periodic / mass_diag_periodic
-    
-        f_n_arrays[idx][:] = P @ f_n_periodic + f_star_arrays[idx][:]
-    
+        b_local = rhsVecStreaming[idx].as_numpy
+
+        f_n_local = b_local / mass_diag_local
         
-    for idx in range(1, Q):
-        dofs = bouncebackDofs[idx]
-        f_n_arrays[idx][dofs] = (
-            f_star_arrays[opp_idx[idx]][dofs])
-            
-            
-          
-    #print("about to solve for phi, mu")
-    b_phi_full = rhs_AC_fn.as_numpy
-
-    b_phi_periodic = comm.sum( P.T @ b_phi_full )
-
-    phi_periodic = b_phi_periodic / mass_diag_periodic
-
-    phi_nP1.as_numpy[:] = ( P @ phi_periodic) + phi_n.as_numpy[:]
+        f_n_arrays[idx][:] = f_n_local + f_star_arrays[idx][:]
     
-    b_mu_full = rhs_Mu_fn.as_numpy
+          
+    b_phi_local = rhs_AC_fn.as_numpy
 
-    b_mu_periodic = comm.sum( P.T @ b_mu_full )
-
-    mu_periodic = b_mu_periodic / mass_diag_periodic
-
-    mu_n.as_numpy[:] = (P @ mu_periodic)
+    phi_local = b_phi_local / mass_diag_local
+    
+    phi_nP1.as_numpy[:] = phi_local + phi_n.as_numpy[:]
     
     phi_n.assign(phi_nP1)
+
+    b_mu_local = rhs_Mu_fn.as_numpy
+
+    mu_local = b_mu_local / mass_diag_local
+    
+    mu_n.as_numpy[:] = mu_local
     
     
     mass_n = dune.fem.integrate((phi_n + 1) / 2)
@@ -974,10 +950,10 @@ for n in range(numSteps):
     
         marker = dune.fem.GridMarker(
             1 - phi_n**2,
-            refineTolerance=0.5,
-            coarsenTolerance=0.2,
+            refineTolerance=0.15,
+            coarsenTolerance=0.1,
             minLevel=0,
-            maxLevel=7)
+            maxLevel=9)
     
         dune.fem.gridAdapt(
             marker,
@@ -997,25 +973,14 @@ for n in range(numSteps):
             f_n[idx].as_numpy for idx in range(Q)]
     
         # Rebuild periodic matrix/factorizations
-        P, mass_diag, mass_diag_periodic = build_solvers()
+        mass_diag_local = build_solvers()
         
-        
-        bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
-        
+        inv_mass = build_inv_mass()
     
-    if n % 100 == 0:
-        
-        finish_time = time.time()
+    if n % 10 == 0:
         
         if comm.rank == 0:
-            print("time per writing event: ", finish_time - start_time, flush=True)
-        
-        if comm.rank == 0:
-            print("n = ", n, "writing to file", flush=True)
-            
-        #print("mass_diff type:", type(mass_diff))
-        
-        #print("mass_n type:", type(mass_n), "\n\n")
+            print("n = ", n, flush=True)
         
         if n > 3000:
             theta_avg = 1 #computeContactAngle(phi_n, h_min, interfaceThickness, mesh)
