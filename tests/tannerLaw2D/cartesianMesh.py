@@ -26,14 +26,14 @@ A = 1
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 surfTen = np.sqrt(8*kappa*A/9)
-M_tilde = 10
-theta_deg = 1.5
+M_tilde = 1
+theta_deg = 0.15
 theta = theta_deg * np.pi / 180
 rho_init = 1.0
 nu = 1/3
 c_s = np.sqrt(1/3)
 tau_1 = 0.1     # relaxation time in the phi = +1 phase (the drop, as phi_init = -tanh(x - xc))
-tau_2 = 0.005    # relaxation time in the phi = -1 phase
+tau_2 = tau_1/50    # relaxation time in the phi = -1 phase
 
 
 Q = 9
@@ -45,7 +45,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"theta_{theta_deg}_A{A}_tauL{tau_1:1g}_viscRatio{tau_1/tau_2:1g}")
+outDirName = os.path.join(WORKDIR, f"M{M_tilde}_A{A}_tauL{tau_1:1g}_viscRatio{tau_1/tau_2:1g}")
 os.makedirs(outDirName, exist_ok=True)
 
 

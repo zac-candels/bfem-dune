@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 def fit_tanners_law(t, R, t_min=None, t_max=None):
     """
-    Fit R(t) = K * t^(1/10) using linear least squares.
+    Fit R(t) = K * t^(1/7) using linear least squares.
 
     Parameters
     ----------
@@ -41,7 +41,7 @@ def fit_tanners_law(t, R, t_min=None, t_max=None):
     # Linear least-squares fit through the origin
     K = np.sum(x * R_data) / np.sum(x**2)
 
-    R_fit = K * t**(1/10)
+    R_fit = K * t**(1/7)
 
     return K, R_fit
 
@@ -50,19 +50,17 @@ kappa = 0.02
 sigma = np.sqrt(8*A_vals/9)
 plt.figure(figsize=(8, 5))
 
-fileName = "/home/zcandels/bfem-dune/tests/tannerLaw2D/theta_1.5_A1_tauL0.1_viscRatio20/simulation_log.txt"
+fileName = "/home/zcandels/tannersLaw/tests/tannerLaw2D/M1_A1_tauL0.1_viscRatio50/simulation_log.txt"
 dataArr = np.loadtxt(fileName, skiprows = 1, usecols=(0, 1, 2, 3))
 
 times = dataArr[:, 0]
 clPos = dataArr[:, 1]
-times = times[:1000]
-times = times - times[0]
-clPos = clPos[:1000]
-clPos = clPos - clPos[0]
+times = times[:] - times[0]
+clPos = clPos[:] - clPos[0]
 
 label = rf"$\sigma$ = {sigma:.2g}"
 
-plt.plot(times, clPos, 'o',
+plt.plot(times[120:], clPos[120:], 'o',
      markersize=3,
      label=label)
 
@@ -81,7 +79,7 @@ print(f"Tanner prefactor K = {K:.6f}")
 
 
 
-plt.plot(times, K*times**(1/7), '--',
+plt.plot(times[120:], K*times[120:]**(1/7), '--',
          label=fr'Tanner fit: $\alpha t^{{1/7}}$')
 
 plt.xlabel('$t^*$', size=15)
