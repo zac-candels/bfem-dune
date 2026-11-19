@@ -25,7 +25,7 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 20
+theta_deg = 80
 theta = theta_deg * np.pi / 180
 
 Q = 9
@@ -61,7 +61,7 @@ p_in = c_s**2 * rho_in
 p_out = c_s**2 * rho_out
 
 tau_1 = 1     # relaxation time in the phi = +1 phase (the drop, as phi_init = -tanh(x - xc))
-tau_2 = 0.02    # relaxation time in the phi = -1 phase
+tau_2 = tau_1/50    # relaxation time in the phi = -1 phase
 
 domain = dune.grid.cartesianDomain(
     [0.0, 0.0],
@@ -87,8 +87,8 @@ for element in mesh.elements:
 h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
-Tfinal = 1500
-dt_mult_fac = 0.01
+Tfinal = 3500
+dt_mult_fac = 0.001
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -97,7 +97,7 @@ numSteps = int(Tfinal/dt)
 
 # ---------------- Output ----------------
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, "testMeniscusTracking") #f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}_longerFiner")
+outDirName = os.path.join(WORKDIR, f"M{M_tilde}_neumannBounceback") #f"viscRatio_{tau_1/tau_2:1g}_dt{dt:1g}_longerFiner")
 os.makedirs(outDirName, exist_ok=True)
 
 log_file = open(outDirName + "/simulation_log.txt", "w")
@@ -121,6 +121,8 @@ if comm.rank == 0:
 V = dune.fem.space.lagrange(mesh, order=1)
 
 x = ufl.SpatialCoordinate(V)
+
+n_f = ufl.FacetNormal(V) 
 
 if comm.rank == 0:
     print("\nSTEP 9: Finite-element space created successfully", flush=True)
@@ -492,7 +494,7 @@ if comm.rank == 0:
     print("about to start making AC forms \n\n", flush=True)
 
 lin_form_AC =  - dt*v*ufl.dot(velocity_n, ufl.grad(phi_n))*ufl.dx\
-    - dt*M_tilde*v*mu_n*ufl.dx - (beta_mass_diff/dt)*mass_diff*ufl.sqrt( ufl.dot(ufl.grad(phi_n), ufl.grad(phi_n)) )*v*ufl.dx\
+    - dt*M_tilde*v*mu_n*ufl.dx\
     - 0.5*dt**2 * ufl.dot(velocity_n, ufl.grad(v)) * ufl.dot(velocity_n, ufl.grad(phi_n)) *ufl.dx
 
 # Wetting acts on the wall only
@@ -528,6 +530,18 @@ for idx in range(Q):
         + dt*v*body_Force(velStar_n, idx, forceDensity)*ufl.dx\
         + double_dot_product_term\
         + dot_product_force_term
+
+    if idx != 0:
+        xi_dot_n = ufl.inner(xi[idx], n_f)
+        inflow   = ufl.min_value(xi_dot_n, 0.0)
+        f_bc     = f_star[opp_idx[idx]]
+
+    # Exclude pressure inlet and outlet (x = 0 and x = L_x)
+    wall_ind = ufl.conditional(ufl.And(x[0] > 1e-6, x[0] < L_x - 1e-6),
+                               1.0, 0.0)
+
+    lin_form_idx += (-dt * v * inflow * (f_bc - f_star[idx])* wall_ind * ufl.ds)
+            
 
     f_eq_idx = f_equil(
         idx,
@@ -717,11 +731,6 @@ for n in range(numSteps):
         f_n_arrays[idx][:] = f_n_local + f_star_arrays[idx][:]
     
     apply_pressure_boundary_conditions(u_in, u_out)
-
-    for idx in range(1, Q):
-        dofs = bouncebackDofs[idx]
-        f_n_arrays[idx][dofs] = (
-            f_star_arrays[opp_idx[idx]][dofs])
             
 
     # Phase field and chemical potential
@@ -778,7 +787,6 @@ for n in range(numSteps):
         
         inletDofs, outletDofs = build_pressure_boundary_dofs()
 
-        bouncebackDofs = build_bounceback_dofs(mesh, V, xi_values, Q)
 
     if n % 2000 == 0:
 
