@@ -1,6 +1,6 @@
 import os
 os.environ["DUNE_LOG_LEVEL"] = "ERROR"
-
+import argparse
 from mpi4py import MPI
 from scipy.sparse import linalg
 from math import sqrt
@@ -26,9 +26,21 @@ A = 0.5
 kappa = 0.02
 interfaceThickness = np.sqrt(kappa/A)
 M_tilde = 10
-theta_deg = 30
-theta = theta_deg * np.pi / 180
+parser = argparse.ArgumentParser(
+    description="2D droplet spreading simulation"
+)
 
+parser.add_argument(
+    "--theta_deg",
+    type=float,
+    default=120,
+    help="Equilibrium contact angle in degrees (default: 120)"
+)
+
+args = parser.parse_args()
+
+theta_deg = args.theta_deg
+theta = theta_deg*np.pi/180
 Q = 9
 
 L_x = 16
@@ -38,7 +50,7 @@ Ny = 10
 
 #%% Prepare output
 WORKDIR = os.getcwd()
-outDirName = os.path.join(WORKDIR, f"bouncebackAllOver")
+outDirName = os.path.join(WORKDIR, f"theta{theta_deg}")
 os.makedirs(outDirName, exist_ok=True)
 
 
@@ -54,7 +66,7 @@ xc, yc = L_x/2, R0 - 0.6*R0
 rho_init = 1.0
 nu = 1/3
 c_s = np.sqrt(1/3)
-tau = 0.1
+tau = 0.01
 
 domain = dune.grid.cartesianDomain(
     [0.0, 0.0],

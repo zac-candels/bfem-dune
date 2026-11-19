@@ -175,7 +175,7 @@ def create_periodic_sphere_mesh(L_x, L_y, L_z, radius,
     return filename
 
 
-h_fine = 0.2
+h_fine = 1.4
 h_coarse = 1.5
 mesh_file = "periodic_sphere.msh"
 
@@ -282,7 +282,7 @@ h_min = comm.min(h_min)
 h_min = h_min*(1/2**3)
 
 Tfinal = 1500
-dt_mult_fac = 0.1
+dt_mult_fac = 0.01
 dt = dt_mult_fac*h_min
 dt_c = dune.ufl.Constant(dt, name="dt")
 beta_mass_diff = 0.01*dt_c
@@ -861,7 +861,7 @@ bottomDoFs, topDoFs = wall_dofs()
 def adapt_mesh():
     global f_star_arrays, f_n_arrays, mass_diag_local, inv_mass
     marker = dune.fem.GridMarker(1 - phi_n**2, refineTolerance=0.1,
-                                 coarsenTolerance=0, minLevel=0, maxLevel=9)
+                                 coarsenTolerance=0, minLevel=0, maxLevel=30)
     dune.fem.gridAdapt(marker, f_n + f_star + rhsVecCollision + rhsVecStreaming
                        + [phi_n, mu_n, zeroFn, rhs_AC_fn, rhs_Mu_fn])
     f_star_arrays = [f.as_numpy for f in f_star]
@@ -953,7 +953,7 @@ for n in range(numSteps):
             refineTolerance=0.15,
             coarsenTolerance=0.1,
             minLevel=0,
-            maxLevel=9)
+            maxLevel=15)
     
         dune.fem.gridAdapt(
             marker,
@@ -977,7 +977,7 @@ for n in range(numSteps):
         
         inv_mass = build_inv_mass()
     
-    if n % 10 == 0:
+    if n % 1 == 0:
         
         if comm.rank == 0:
             print("n = ", n, flush=True)
